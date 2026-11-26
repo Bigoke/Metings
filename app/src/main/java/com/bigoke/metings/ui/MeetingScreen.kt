@@ -1,5 +1,6 @@
 package com.bigoke.metings.ui
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,23 +26,30 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Forward10
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
+import androidx.compose.material.icons.outlined.RecordVoiceOver
 import androidx.compose.material.icons.outlined.Replay10
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -71,6 +79,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -79,8 +88,8 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bigoke.metings.MetingsApp
@@ -88,20 +97,26 @@ import com.bigoke.metings.data.Entity
 import com.bigoke.metings.data.EntityType
 import com.bigoke.metings.data.Meeting
 import com.bigoke.metings.data.MeetingStatus
+import com.bigoke.metings.data.Templates
 import com.bigoke.metings.engine.EntityExtractor
 import com.bigoke.metings.engine.TextCleaner
 import com.bigoke.metings.service.ProcessingService
 import com.bigoke.metings.ui.theme.MonoNumbers
 import com.bigoke.metings.ui.theme.entityColor
 import com.bigoke.metings.ui.theme.speakerColor
+import com.bigoke.metings.util.EngineGuard
 import com.bigoke.metings.util.EntityActions
 import com.bigoke.metings.util.Exporter
+import com.bigoke.metings.util.LocalAf
+import com.bigoke.metings.util.tr
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-private fun reExtract(m: Meeting): Meeting =
-    m.copy(entities = EntityExtractor(m.createdAt).extract(m.utterances, m.speakers.associate { it.id to it.name }))
+private fun reExtract(m: Meeting): Meeting = m.copy(
+    entities = EntityExtractor(m.createdAt, MetingsApp.instance.prefs.settings.value.vocabulary)
+        .extract(m.utterances, m.speakers.associate { it.id to it.name })
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,21 +124,29 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
     val app = MetingsApp.instance
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val af = LocalAf.current
     val meetings by app.repo.meetings.collectAsStateWithLifecycle()
     val progressMap by app.pipeline.progress.collectAsStateWithLifecycle()
+    val settings by app.prefs.settings.collectAsStateWithLifecycle()
     val m = meetings.firstOrNull { it.id == id }
     if (m == null) {
         LaunchedEffect(Unit) { onBack() }
         return
     }
-    val af = m.language == "af"
     val player = rememberAudioPlayer(app.repo.audio(m))
     var tab by remember { mutableIntStateOf(0) }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var sheetEntity by remember { mutableStateOf<Entity?>(null) }
     var editing by remember { mutableStateOf<Int?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var hit by remember { mutableIntStateOf(0) }
+    val matches = remember(m.utterances, query) {
+        if (query.length < 2) emptyList() else m.utterances.indices.filter { m.utterances[it].text.contains(query, ignoreCase = true) }
+    }
 
     fun save(change: (Meeting) -> Meeting) {
         scope.launch(Dispatchers.Default) { app.repo.update(id, change) }
@@ -133,44 +156,76 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(m.title, maxLines = 1, modifier = Modifier.clickable { renaming = true })
+                    if (searching) {
+                        OutlinedTextField(
+                            value = query, onValueChange = { query = it; hit = 0 }, singleLine = true,
+                            placeholder = { Text(tr("Search this meeting", "Soek in hierdie vergadering")) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else Text(m.title, maxLines = 1, modifier = Modifier.clickable { renaming = true })
                 },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("Back", "Terug")) } },
                 actions = {
-                    if (m.status == MeetingStatus.READY) IconButton(onClick = { Exporter.share(ctx, m, includePdf = true, includeAudio = true) }) {
-                        Icon(Icons.Outlined.Share, "Share")
+                    if (searching) {
+                        IconButton(onClick = { searching = false; query = "" }) { Icon(Icons.Outlined.Close, tr("Close search", "Maak soek toe")) }
+                    } else {
+                        if (m.utterances.isNotEmpty()) IconButton(onClick = { searching = true; tab = 1 }) { Icon(Icons.Outlined.Search, tr("Search", "Soek")) }
+                        if (m.status == MeetingStatus.READY) IconButton(onClick = { Exporter.share(ctx, m, includePdf = true, includeAudio = true) }) {
+                            Icon(Icons.Outlined.Share, tr("Share", "Deel"))
+                        }
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, tr("More", "Meer")) }
                     }
-                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, "More") }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("Rename") }, onClick = { menu = false; renaming = true })
+                        DropdownMenuItem(text = { Text(tr("Rename", "Hernoem")) }, onClick = { menu = false; renaming = true })
+                        DropdownMenuItem(text = { Text(tr("Move to folder", "Skuif na vouer")) }, onClick = { menu = false; moving = true })
                         if (m.status == MeetingStatus.READY) {
-                            DropdownMenuItem(text = { Text("Share PDF + audio") }, onClick = { menu = false; Exporter.share(ctx, m, true, true) })
-                            DropdownMenuItem(text = { Text("Share PDF only") }, onClick = { menu = false; Exporter.share(ctx, m, true, false) })
-                            DropdownMenuItem(text = { Text("Share as Word document") }, onClick = { menu = false; Exporter.shareWord(ctx, m) })
-                            DropdownMenuItem(text = { Text("Share as text") }, onClick = { menu = false; Exporter.shareText(ctx, m) })
-                            DropdownMenuItem(text = { Text("Share audio only") }, onClick = { menu = false; Exporter.share(ctx, m, false, true) })
-                            DropdownMenuItem(text = { Text("Rewrite summary") }, onClick = { menu = false; ProcessingService.enqueue(ctx, id, summaryOnly = true) })
+                            DropdownMenuItem(text = { Text(tr("Share minutes (PDF) + audio", "Deel notule (PDF) + klank")) }, onClick = { menu = false; Exporter.share(ctx, m, true, true) })
+                            DropdownMenuItem(text = { Text(tr("Share minutes (PDF) only", "Deel slegs notule (PDF)")) }, onClick = { menu = false; Exporter.share(ctx, m, true, false) })
+                            DropdownMenuItem(text = { Text(tr("Share as Word document", "Deel as Word-dokument")) }, onClick = { menu = false; Exporter.shareWord(ctx, m) })
+                            DropdownMenuItem(text = { Text(tr("Share as text", "Deel as teks")) }, onClick = { menu = false; Exporter.shareText(ctx, m) })
+                            DropdownMenuItem(text = { Text(tr("Share audio only", "Deel slegs klank")) }, onClick = { menu = false; Exporter.share(ctx, m, false, true) })
+                            DropdownMenuItem(text = { Text(tr("Rewrite summary", "Herskryf opsomming")) }, onClick = { menu = false; ProcessingService.enqueue(ctx, id, summaryOnly = true) })
                         }
                         if (app.repo.audio(m).name.endsWith(".wav") && m.status != MeetingStatus.PROCESSING) {
-                            DropdownMenuItem(text = { Text("Process again") }, onClick = {
+                            DropdownMenuItem(text = { Text(tr("Process again", "Verwerk weer")) }, onClick = {
                                 menu = false
+                                EngineGuard.clear(id)
                                 app.repo.update(id) { it.copy(status = MeetingStatus.QUEUED) }
                                 ProcessingService.enqueue(ctx, id)
                             })
                         }
-                        DropdownMenuItem(text = { Text("Delete", color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; confirmDelete = true })
+                        DropdownMenuItem(text = { Text(tr("Delete", "Skrap"), color = MaterialTheme.colorScheme.error) }, onClick = { menu = false; confirmDelete = true })
                     }
                 },
             )
         },
-        bottomBar = { PlayerBar(player, m) },
+        bottomBar = {
+            Column {
+                if (searching && query.length >= 2) {
+                    Surface(tonalElevation = 2.dp) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (matches.isEmpty()) tr("No matches", "Niks gevind nie") else "${hit + 1} / ${matches.size}",
+                                style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = { if (matches.isNotEmpty()) hit = (hit - 1 + matches.size) % matches.size }) { Icon(Icons.Outlined.KeyboardArrowUp, null) }
+                            IconButton(onClick = { if (matches.isNotEmpty()) hit = (hit + 1) % matches.size }) { Icon(Icons.Outlined.KeyboardArrowDown, null) }
+                        }
+                    }
+                }
+                PlayerBar(player, m, markers = matches.map { m.utterances[it].startMs }, bookmarks = m.bookmarksMs)
+            }
+        },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    formatDate(m.createdAt) + " · " + formatDuration(m.durationMs),
+                    listOfNotNull(
+                        formatDate(m.createdAt), formatDuration(m.durationMs), m.folder.takeIf { it.isNotBlank() },
+                        Templates.get(m.template).takeIf { it.id != "general" }?.let { if (af) it.af else it.en },
+                    ).joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f), maxLines = 2,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy((-6).dp)) {
                     m.speakers.take(6).forEach { SpeakerAvatar(it.name, it.colorIndex, 24.dp) }
@@ -182,31 +237,38 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                         ProcessingService.cancel(ctx)
                     }
                 MeetingStatus.FAILED -> FailedCard(m.error) {
+                    EngineGuard.clear(id)
                     app.repo.update(id) { it.copy(status = MeetingStatus.QUEUED, error = null) }
                     ProcessingService.enqueue(ctx, id)
                 }
                 MeetingStatus.READY -> {}
             }
             if (m.utterances.isNotEmpty() || m.status == MeetingStatus.READY) {
-                val tabs = if (af) listOf("Opsomming", "Transkripsie", "Besonderhede", "Mense") else listOf("Summary", "Transcript", "Details", "People")
+                val tabs = listOf(tr("Summary", "Opsomming"), tr("Transcript", "Transkripsie"), tr("Details", "Besonderhede"), tr("People", "Mense"))
                 PrimaryTabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background) {
                     tabs.forEachIndexed { i, t -> Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, maxLines = 1) }) }
                 }
                 when (tab) {
-                    0 -> SummaryTab(m, af, onModels, onToggle = { idx ->
+                    0 -> SummaryTab(m, onModels, onToggle = { idx ->
                         save { mm -> mm.copy(summary = mm.summary?.let { sm -> sm.copy(actions = sm.actions.mapIndexed { i, a -> if (i == idx) a.copy(done = !a.done) else a }) }) }
                     }, onRewrite = { ProcessingService.enqueue(ctx, id, summaryOnly = true) })
-                    1 -> TranscriptTab(m, player, onEntity = { sheetEntity = it }, onEdit = { editing = it })
+                    1 -> TranscriptTab(
+                        m, player, settings.markUnsure, query.takeIf { searching && it.length >= 2 },
+                        matches.getOrNull(hit), onEntity = { sheetEntity = it }, onEdit = { editing = it },
+                    )
                     2 -> DetailsTab(m, af, onEntity = { sheetEntity = it })
-                    3 -> PeopleTab(m, af, onRename = { sid, name ->
+                    3 -> PeopleTab(m, onRename = { sid, name, rememberVoice ->
+                        val sp = m.speaker(sid)
+                        if (rememberVoice) scope.launch(Dispatchers.Default) { app.voices.remember(name, sp.voiceprint) }
                         save { mm ->
                             val old = mm.speakerName(sid)
-                            val renamed = mm.copy(speakers = mm.speakers.map { if (it.id == sid) it.copy(name = name) else it })
+                            val renamed = mm.copy(speakers = mm.speakers.map { if (it.id == sid) it.copy(name = name, recognised = false) else it })
                             val sum = renamed.summary?.let { s ->
                                 fun r(x: String) = x.replace(old, name)
                                 s.copy(
                                     overview = r(s.overview), decisions = s.decisions.map(::r), keyFigures = s.keyFigures.map(::r),
-                                    followUps = s.followUps.map(::r), actions = s.actions.map { a -> a.copy(text = r(a.text), owner = r(a.owner)) },
+                                    followUps = s.followUps.map(::r), extra = s.extra.map(::r),
+                                    actions = s.actions.map { a -> a.copy(text = r(a.text), owner = r(a.owner)) },
                                 )
                             }
                             reExtract(renamed.copy(summary = sum))
@@ -228,19 +290,36 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
         var text by remember { mutableStateOf(m.title) }
         AlertDialog(
             onDismissRequest = { renaming = false },
-            title = { Text("Rename meeting") },
+            title = { Text(tr("Rename meeting", "Hernoem vergadering")) },
             text = { OutlinedTextField(text, { text = it }, singleLine = true) },
-            confirmButton = { TextButton(onClick = { renaming = false; save { it.copy(title = text.trim().ifEmpty { it.title }) } }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+            confirmButton = { TextButton(onClick = { renaming = false; save { it.copy(title = text.trim().ifEmpty { it.title }) } }) { Text(tr("Save", "Stoor")) } },
+            dismissButton = { TextButton(onClick = { renaming = false }) { Text(tr("Cancel", "Kanselleer")) } },
+        )
+    }
+    if (moving) {
+        var text by remember { mutableStateOf(m.folder) }
+        val folders = remember(meetings) { meetings.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted() }
+        AlertDialog(
+            onDismissRequest = { moving = false },
+            title = { Text(tr("Folder / client", "Vouer / kliënt")) },
+            text = {
+                Column {
+                    OutlinedTextField(text, { text = it }, singleLine = true, placeholder = { Text(tr("New folder name", "Nuwe vouernaam")) })
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow2 { folders.forEach { f -> AssistChip(onClick = { text = f }, label = { Text(f) }) } }
+                }
+            },
+            confirmButton = { TextButton(onClick = { moving = false; save { it.copy(folder = text.trim()) } }) { Text(tr("Save", "Stoor")) } },
+            dismissButton = { TextButton(onClick = { moving = false }) { Text(tr("Cancel", "Kanselleer")) } },
         )
     }
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("Delete meeting?") },
-            text = { Text("The recording, transcript and summary will be removed from this phone.") },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; player.release(); app.repo.delete(id); onBack() }) { Text("Delete", color = MaterialTheme.colorScheme.error) } },
-            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
+            title = { Text(tr("Delete meeting?", "Skrap vergadering?")) },
+            text = { Text(tr("The recording, transcript and summary will be removed from this phone.", "Die opname, transkripsie en opsomming word van hierdie foon verwyder.")) },
+            confirmButton = { TextButton(onClick = { confirmDelete = false; player.release(); app.repo.delete(id); onBack() }) { Text(tr("Delete", "Skrap"), color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(tr("Cancel", "Kanselleer")) } },
         )
     }
     editing?.let { idx ->
@@ -250,7 +329,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
             var spk by remember(idx) { mutableIntStateOf(u.speaker) }
             AlertDialog(
                 onDismissRequest = { editing = null },
-                title = { Text(if (af) "Wysig teks" else "Edit text") },
+                title = { Text(tr("Edit text", "Wysig teks")) },
                 text = {
                     Column {
                         FlowRow2 {
@@ -268,12 +347,12 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                         editing = null
                         save { mm ->
                             reExtract(mm.copy(utterances = mm.utterances.mapIndexed { i, x ->
-                                if (i == idx) x.copy(text = TextCleaner.clean(text, mm.language, false), speaker = spk, edited = true) else x
+                                if (i == idx) x.copy(text = TextCleaner.clean(text, mm.language, false), speaker = spk, edited = true, unsure = emptyList()) else x
                             }))
                         }
-                    }) { Text("Save") }
+                    }) { Text(tr("Save", "Stoor")) }
                 },
-                dismissButton = { TextButton(onClick = { editing = null }) { Text("Cancel") } },
+                dismissButton = { TextButton(onClick = { editing = null }) { Text(tr("Cancel", "Kanselleer")) } },
             )
         }
     }
@@ -282,7 +361,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun FlowRow2(content: @Composable () -> Unit) {
+fun FlowRow2(content: @Composable () -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) { content() }
 }
 
@@ -291,22 +370,24 @@ private fun ProcessingCard(m: Meeting, stage: String?, overall: Float?, coreRead
     Card(Modifier.fillMaxWidth().padding(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
         Column(Modifier.padding(16.dp)) {
             if (!coreReady && m.status == MeetingStatus.QUEUED) {
-                Text("Waiting for the offline models", style = MaterialTheme.typography.titleSmall)
-                Text("Your recording is saved. Download the models and it will be processed automatically.", style = MaterialTheme.typography.bodySmall)
+                Text(tr("Waiting for the offline models", "Wag vir die vanlyn-modelle"), style = MaterialTheme.typography.titleSmall)
+                Text(tr("Your recording is saved. Download the models and it will be processed automatically.",
+                    "Jou opname is gestoor. Laai die modelle af en dit word outomaties verwerk."), style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
-                Button(onClick = onModels) { Text("Download models") }
+                Button(onClick = onModels) { Text(tr("Download models", "Laai modelle af")) }
             } else {
-                Text(stage?.let { "$it…" } ?: "Waiting to start…", style = MaterialTheme.typography.titleSmall)
+                Text(stage?.let { stageText(it) + "…" } ?: tr("Waiting to start…", "Wag om te begin…"), style = MaterialTheme.typography.titleSmall)
                 Spacer(Modifier.height(8.dp))
                 if (overall != null) LinearProgressIndicator(progress = { overall }, modifier = Modifier.fillMaxWidth())
                 else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        "Everything runs on your phone. You can leave the app — you'll get a notification when it's ready.",
+                        tr("Everything runs on your phone. You can leave the app — you'll get a notification when it's ready.",
+                            "Alles gebeur op jou foon. Jy kan die toep verlaat — jy kry 'n kennisgewing wanneer dit gereed is."),
                         style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f),
                     )
-                    TextButton(onClick = onStop) { Text("Stop") }
+                    TextButton(onClick = onStop) { Text(tr("Stop", "Stop")) }
                 }
             }
         }
@@ -319,8 +400,8 @@ private fun FailedCard(error: String?, onRetry: () -> Unit) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Outlined.ErrorOutline, null)
             Spacer(Modifier.width(10.dp))
-            Text(error ?: "Processing failed", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onRetry) { Text("Retry") }
+            Text(error ?: tr("Processing failed", "Verwerking het misluk"), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onRetry) { Text(tr("Retry", "Probeer weer")) }
         }
     }
 }
@@ -328,15 +409,29 @@ private fun FailedCard(error: String?, onRetry: () -> Unit) {
 // ---------------------------------------------------------------------------------------- player
 
 @Composable
-private fun PlayerBar(p: AudioPlayer, m: Meeting) {
+private fun PlayerBar(p: AudioPlayer, m: Meeting, markers: List<Long>, bookmarks: List<Long>) {
     Surface(tonalElevation = 3.dp, shadowElevation = 8.dp) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 6.dp)) {
             if (!p.available) {
-                Text("Audio will be available after recording.", style = MaterialTheme.typography.bodySmall,
+                Text(tr("Audio will be available after recording.", "Klank is beskikbaar na die opname."), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(8.dp))
                 return@Column
             }
             val dur = if (p.duration > 0) p.duration else m.durationMs
+            if (dur > 0 && (markers.isNotEmpty() || bookmarks.isNotEmpty())) {
+                val hitColor = MaterialTheme.colorScheme.tertiary
+                val markColor = MaterialTheme.colorScheme.secondary
+                Canvas(Modifier.fillMaxWidth().height(8.dp).padding(horizontal = 10.dp)) {
+                    bookmarks.forEach { b ->
+                        val x = size.width * (b.toFloat() / dur).coerceIn(0f, 1f)
+                        drawLine(markColor, Offset(x, 0f), Offset(x, size.height), strokeWidth = 4f)
+                    }
+                    markers.forEach { t ->
+                        val x = size.width * (t.toFloat() / dur).coerceIn(0f, 1f)
+                        drawCircle(hitColor, radius = 4f, center = Offset(x, size.height / 2))
+                    }
+                }
+            }
             Slider(
                 value = if (dur > 0) (p.position.toFloat() / dur).coerceIn(0f, 1f) else 0f,
                 onValueChange = { p.seekTo((it * dur).toLong(), play = p.playing) },
@@ -345,14 +440,14 @@ private fun PlayerBar(p: AudioPlayer, m: Meeting) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(formatDuration(p.position), style = MonoNumbers, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { p.skip(-10_000) }) { Icon(Icons.Outlined.Replay10, "Back 10 s") }
+                IconButton(onClick = { p.skip(-10_000) }) { Icon(Icons.Outlined.Replay10, "-10 s") }
                 Box(
                     Modifier.size(48.dp).background(MaterialTheme.colorScheme.primary, CircleShape).clickable { p.toggle() },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(if (p.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play", tint = MaterialTheme.colorScheme.onPrimary)
+                    Icon(if (p.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, tr("Play", "Speel"), tint = MaterialTheme.colorScheme.onPrimary)
                 }
-                IconButton(onClick = { p.skip(10_000) }) { Icon(Icons.Outlined.Forward10, "Forward 10 s") }
+                IconButton(onClick = { p.skip(10_000) }) { Icon(Icons.Outlined.Forward10, "+10 s") }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = { p.cycleSpeed() }) { Text("${p.speed}×".replace(".0×", "×")) }
                 Text(formatDuration(dur), style = MonoNumbers, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -364,38 +459,38 @@ private fun PlayerBar(p: AudioPlayer, m: Meeting) {
 // ---------------------------------------------------------------------------------------- summary
 
 @Composable
-private fun SummaryTab(m: Meeting, af: Boolean, onModels: () -> Unit, onToggle: (Int) -> Unit, onRewrite: () -> Unit) {
+private fun SummaryTab(m: Meeting, onModels: () -> Unit, onToggle: (Int) -> Unit, onRewrite: () -> Unit) {
+    val ctx = LocalContext.current
     val s = m.summary
+    var sendTasks by remember { mutableStateOf(false) }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (s == null) {
-            item { Text(if (af) "Die opsomming word nog gemaak." else "The summary is still being prepared.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text(tr("The summary is still being prepared.", "Die opsomming word nog gemaak."), color = MaterialTheme.colorScheme.onSurfaceVariant) }
             return@LazyColumn
         }
         item {
-            SummaryCard(if (af) "Oorsig" else "Overview") {
+            SummaryCard(tr("Overview", "Oorsig")) {
                 Text(s.overview.ifBlank { "—" }, style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(4.dp))
                     Text(
-                        if (s.engine == "gemma") "Written on this phone by Gemma" else "Key sentences (summary AI not installed)",
+                        if (s.engine == "gemma") tr("Written on this phone by Gemma", "Op hierdie foon deur Gemma geskryf")
+                        else tr("Key sentences (summary AI not used)", "Sleutelsinne (opsomming-KI nie gebruik nie)"),
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
                     if (s.engine != "gemma" && !MetingsApp.instance.models.isReady(com.bigoke.metings.engine.ModelKind.SUMMARY))
-                        TextButton(onClick = onModels) { Text("Get AI") }
-                    else TextButton(onClick = onRewrite) { Text(if (af) "Herskryf" else "Rewrite") }
+                        TextButton(onClick = onModels) { Text(tr("Get AI", "Kry KI")) }
+                    else TextButton(onClick = onRewrite) { Text(tr("Rewrite", "Herskryf")) }
                 }
             }
         }
-        if (s.decisions.isNotEmpty()) item {
-            SummaryCard(if (af) "Besluite" else "Decisions") {
-                s.decisions.forEach { Bullet(it) }
-            }
-        }
+        if (s.decisions.isNotEmpty()) item { SummaryCard(tr("Decisions", "Besluite")) { s.decisions.forEach { Bullet(it) } } }
+        if (s.extra.isNotEmpty()) item { SummaryCard(s.extraTitle) { s.extra.forEach { Bullet(it) } } }
         if (s.actions.isNotEmpty()) item {
-            SummaryCard(if (af) "Aksiepunte" else "Action items") {
+            SummaryCard(tr("Action items", "Aksiepunte")) {
                 s.actions.forEachIndexed { i, a ->
                     Row(Modifier.fillMaxWidth().clickable { onToggle(i) }.padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
                         Icon(
@@ -406,26 +501,58 @@ private fun SummaryTab(m: Meeting, af: Boolean, onModels: () -> Unit, onToggle: 
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text(a.text, style = MaterialTheme.typography.bodyMedium,
+                                textDecoration = if (a.done) TextDecoration.LineThrough else null,
                                 color = if (a.done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
                             val meta = listOfNotNull(a.owner.takeIf { it.isNotBlank() }, a.due.takeIf { it.isNotBlank() }).joinToString(" · ")
                             if (meta.isNotEmpty()) Text(meta, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
                         }
                     }
                 }
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(onClick = { sendTasks = true }) {
+                    Icon(Icons.AutoMirrored.Outlined.Send, null, Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                    Text(tr("Send tasks to people", "Stuur take aan mense"))
+                }
             }
         }
-        if (s.keyFigures.isNotEmpty()) item {
-            SummaryCard(if (af) "Sleutelsyfers" else "Key figures") { s.keyFigures.forEach { Bullet(it) } }
-        }
-        if (s.followUps.isNotEmpty()) item {
-            SummaryCard(if (af) "Opvolging" else "Follow-ups") { s.followUps.forEach { Bullet(it) } }
-        }
+        if (s.keyFigures.isNotEmpty()) item { SummaryCard(tr("Key figures", "Sleutelsyfers")) { s.keyFigures.forEach { Bullet(it) } } }
+        if (s.followUps.isNotEmpty()) item { SummaryCard(tr("Follow-ups", "Opvolging")) { s.followUps.forEach { Bullet(it) } } }
         item { Spacer(Modifier.height(24.dp)) }
+    }
+    if (sendTasks && s != null) {
+        val owners = s.actions.filter { !it.done }.map { it.owner }.distinct()
+        AlertDialog(
+            onDismissRequest = { sendTasks = false },
+            title = { Text(tr("Send tasks to…", "Stuur take aan…")) },
+            text = {
+                Column {
+                    if (owners.isEmpty()) Text(tr("All tasks are done.", "Alle take is klaar."))
+                    owners.forEach { o ->
+                        val n = s.actions.count { !it.done && it.owner == o }
+                        Row(
+                            Modifier.fillMaxWidth().clickable { sendTasks = false; Exporter.shareTasks(ctx, m, o) }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(o.ifBlank { tr("Unassigned", "Nie toegewys nie") }, Modifier.weight(1f))
+                            Text("$n", color = MaterialTheme.colorScheme.secondary)
+                        }
+                    }
+                    if (owners.size > 1) {
+                        HorizontalDivider()
+                        Row(Modifier.fillMaxWidth().clickable { sendTasks = false; Exporter.shareTasks(ctx, m, "") }.padding(vertical = 10.dp)) {
+                            Text(tr("Everyone (all open tasks)", "Almal (alle oop take)"))
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { sendTasks = false }) { Text(tr("Cancel", "Kanselleer")) } },
+        )
     }
 }
 
 @Composable
-private fun SummaryCard(title: String, content: @Composable () -> Unit) {
+fun SummaryCard(title: String, content: @Composable () -> Unit) {
     Card(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -452,11 +579,17 @@ private fun Bullet(text: String) {
 // ---------------------------------------------------------------------------------------- transcript
 
 @Composable
-private fun TranscriptTab(m: Meeting, player: AudioPlayer, onEntity: (Entity) -> Unit, onEdit: (Int) -> Unit) {
+private fun TranscriptTab(
+    m: Meeting, player: AudioPlayer, markUnsure: Boolean, query: String?, focus: Int?,
+    onEntity: (Entity) -> Unit, onEdit: (Int) -> Unit,
+) {
     val byUtterance = remember(m.entities) { m.entities.filter { it.type != EntityType.TASK }.groupBy { it.utterance } }
     val taskUtterances = remember(m.entities) { m.entities.filter { it.type == EntityType.TASK }.map { it.utterance }.toSet() }
     val listState = rememberLazyListState()
+    val headerItems = if (m.bookmarksMs.isNotEmpty()) 1 else 0
+    LaunchedEffect(focus) { if (focus != null) listState.animateScrollToItem(focus + headerItems) }
     val current = m.utterances.indexOfLast { it.startMs <= player.position + 150 }.takeIf { player.playing || player.position > 0 } ?: -1
+    val hitBg = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.30f)
     LazyColumn(state = listState, contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 24.dp)) {
         if (m.bookmarksMs.isNotEmpty()) item {
             FlowRow2 {
@@ -471,7 +604,13 @@ private fun TranscriptTab(m: Meeting, player: AudioPlayer, onEntity: (Entity) ->
             val active = idx == current
             Column(
                 Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                    .background(if (active) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else Color.Transparent, RoundedCornerShape(12.dp))
+                    .background(
+                        when {
+                            idx == focus -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                            active -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                            else -> Color.Transparent
+                        }, RoundedCornerShape(12.dp),
+                    )
                     .padding(horizontal = 8.dp, vertical = 8.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -485,16 +624,16 @@ private fun TranscriptTab(m: Meeting, player: AudioPlayer, onEntity: (Entity) ->
                     )
                     if (idx in taskUtterances) {
                         Spacer(Modifier.width(4.dp))
-                        Text("● " + (if (m.language == "af") "taak" else "task"), style = MaterialTheme.typography.labelSmall, color = entityColor(EntityType.TASK))
+                        Text("● " + tr("task", "taak"), style = MaterialTheme.typography.labelSmall, color = entityColor(EntityType.TASK))
                     }
                     Spacer(Modifier.weight(1f))
                     IconButton(onClick = { onEdit(idx) }, modifier = Modifier.size(28.dp)) {
-                        Icon(Icons.Outlined.Edit, "Edit", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
+                        Icon(Icons.Outlined.Edit, tr("Edit", "Wysig"), Modifier.size(16.dp), tint = MaterialTheme.colorScheme.outline)
                     }
                 }
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    highlighted(u.text, byUtterance[idx].orEmpty(), onEntity),
+                    highlighted(u.text, byUtterance[idx].orEmpty(), if (markUnsure) u.unsure else emptyList(), query, hitBg, onEntity),
                     style = MaterialTheme.typography.bodyLarge,
                     modifier = Modifier.padding(start = 34.dp).clickable { player.seekTo(u.startMs) },
                 )
@@ -503,7 +642,9 @@ private fun TranscriptTab(m: Meeting, player: AudioPlayer, onEntity: (Entity) ->
     }
 }
 
-private fun highlighted(text: String, entities: List<Entity>, onEntity: (Entity) -> Unit): AnnotatedString = buildAnnotatedString {
+private fun highlighted(
+    text: String, entities: List<Entity>, unsure: List<String>, query: String?, hitBg: Color, onEntity: (Entity) -> Unit,
+): AnnotatedString = buildAnnotatedString {
     var pos = 0
     for (e in entities.sortedBy { it.start }) {
         if (e.start < pos || e.end > text.length) continue
@@ -516,19 +657,41 @@ private fun highlighted(text: String, entities: List<Entity>, onEntity: (Entity)
         pos = e.end
     }
     if (pos < text.length) append(text.substring(pos))
+    // Words the speech model was unsure about: underlined in amber so they can be checked against the audio.
+    if (unsure.isNotEmpty()) {
+        val lower = text.lowercase()
+        for (w in unsure) {
+            var from = 0
+            while (true) {
+                val i = lower.indexOf(w, from)
+                if (i < 0) break
+                val before = lower.getOrNull(i - 1); val after = lower.getOrNull(i + w.length)
+                if ((before == null || !before.isLetterOrDigit()) && (after == null || !after.isLetterOrDigit())) {
+                    addStyle(SpanStyle(textDecoration = TextDecoration.Underline, color = Color(0xFFB7791F)), i, i + w.length)
+                }
+                from = i + w.length
+            }
+        }
+    }
+    if (!query.isNullOrBlank()) {
+        val lower = text.lowercase(); val q = query.lowercase()
+        var from = 0
+        while (true) {
+            val i = lower.indexOf(q, from)
+            if (i < 0) break
+            addStyle(SpanStyle(background = hitBg, fontWeight = FontWeight.Bold), i, i + q.length)
+            from = i + q.length
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------- details
 
 @Composable
 private fun DetailsTab(m: Meeting, af: Boolean, onEntity: (Entity) -> Unit) {
-    val groups = remember(m.entities) {
-        m.entities.groupBy { it.type }.toSortedMap(compareBy { it.ordinal })
-    }
+    val groups = remember(m.entities) { m.entities.groupBy { it.type }.toSortedMap(compareBy { it.ordinal }) }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (groups.isEmpty()) item {
-            Text(if (af) "Geen besonderhede gevind nie." else "No details found.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        if (groups.isEmpty()) item { Text(tr("No details found.", "Geen besonderhede gevind nie."), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         groups.forEach { (type, list) ->
             item(key = type.name) {
                 SummaryCard("${entityLabel(type, af)} · ${list.size}") {
@@ -538,10 +701,8 @@ private fun DetailsTab(m: Meeting, af: Boolean, onEntity: (Entity) -> Unit) {
                             if (parts.size == 2) parts[0] to (parts[1].toDoubleOrNull() ?: 0.0) else null
                         }.groupBy({ it.first }, { it.second }).mapValues { it.value.sum() }
                         totals.forEach { (cur, sum) ->
-                            Text(
-                                (if (af) "Totaal genoem: " else "Total mentioned: ") + money(cur, sum),
-                                style = MaterialTheme.typography.titleSmall, color = entityColor(EntityType.AMOUNT),
-                            )
+                            Text(tr("Total mentioned: ", "Totaal genoem: ") + money(cur, sum),
+                                style = MaterialTheme.typography.titleSmall, color = entityColor(EntityType.AMOUNT))
                         }
                         Spacer(Modifier.height(6.dp))
                     }
@@ -569,11 +730,8 @@ private fun DetailsTab(m: Meeting, af: Boolean, onEntity: (Entity) -> Unit) {
                                 ) {
                                     if (type == EntityType.COLOUR) {
                                         Box(Modifier.size(14.dp).background(parseColor(e.value), CircleShape).border(1.dp, MaterialTheme.colorScheme.outline, CircleShape))
-                                        Spacer(Modifier.width(6.dp))
-                                    } else {
-                                        Icon(entityIcon(type), null, Modifier.size(15.dp), tint = c)
-                                        Spacer(Modifier.width(6.dp))
-                                    }
+                                    } else Icon(entityIcon(type), null, Modifier.size(15.dp), tint = c)
+                                    Spacer(Modifier.width(6.dp))
                                     Text(displayValue(e), style = MaterialTheme.typography.bodyMedium, color = c)
                                 }
                             }
@@ -586,7 +744,7 @@ private fun DetailsTab(m: Meeting, af: Boolean, onEntity: (Entity) -> Unit) {
     }
 }
 
-private fun money(code: String, v: Double): String {
+fun money(code: String, v: Double): String {
     val sym = when (code) { "ZAR" -> "R"; "USD" -> "$"; "EUR" -> "€"; "GBP" -> "£"; else -> "$code " }
     val nf = java.text.NumberFormat.getNumberInstance(Locale("en", "ZA")).apply { maximumFractionDigits = 2; minimumFractionDigits = if (v % 1.0 == 0.0) 0 else 2 }
     return sym + nf.format(v).replace(',', ' ')
@@ -608,7 +766,7 @@ private fun parseColor(hex: String): Color = runCatching { Color(android.graphic
 // ---------------------------------------------------------------------------------------- people
 
 @Composable
-private fun PeopleTab(m: Meeting, af: Boolean, onRename: (Int, String) -> Unit, onMerge: (Int, Int) -> Unit) {
+private fun PeopleTab(m: Meeting, onRename: (Int, String, Boolean) -> Unit, onMerge: (Int, Int) -> Unit) {
     var renameId by remember { mutableStateOf<Int?>(null) }
     var mergeId by remember { mutableStateOf<Int?>(null) }
     val talk = remember(m.utterances) {
@@ -618,8 +776,8 @@ private fun PeopleTab(m: Meeting, af: Boolean, onRename: (Int, String) -> Unit, 
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Text(
-                if (af) "Stemme word outomaties herken. Tik op 'n persoon om die naam te verander, of voeg twee saam as dit dieselfde persoon is."
-                else "Voices are recognised automatically. Tap a person to set their name, or merge two that are the same person.",
+                tr("Voices are recognised automatically. Name a person once and Notule recognises their voice in future meetings.",
+                    "Stemme word outomaties herken. Gee 'n persoon een keer 'n naam en Notule herken hulle stem in toekomstige vergaderings."),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -634,16 +792,21 @@ private fun PeopleTab(m: Meeting, af: Boolean, onRename: (Int, String) -> Unit, 
                             Column(Modifier.weight(1f)) {
                                 Text(s.name, style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    "${formatDuration(ms)} · ${(ms * 100 / totalTalk)}% · $words " + (if (af) "woorde" else "words"),
+                                    "${formatDuration(ms)} · ${(ms * 100 / totalTalk)}% · $words " + tr("words", "woorde"),
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                                if (s.recognised) Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Outlined.RecordVoiceOver, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.secondary)
+                                    Text(" " + tr("Recognised from earlier meetings", "Herken uit vorige vergaderings"),
+                                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                                }
                             }
                         }
                         Spacer(Modifier.height(10.dp))
                         LinearProgressIndicator(progress = { ms.toFloat() / totalTalk }, color = speakerColor(s.colorIndex), modifier = Modifier.fillMaxWidth())
                         Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { renameId = s.id }) { Text(if (af) "Hernoem" else "Rename") }
-                            if (m.speakers.size > 1) OutlinedButton(onClick = { mergeId = s.id }) { Text(if (af) "Voeg saam" else "Merge") }
+                            TextButton(onClick = { renameId = s.id }) { Text(if (s.recognised) tr("Not them? Rename", "Nie hulle nie? Hernoem") else tr("Rename", "Hernoem")) }
+                            if (m.speakers.size > 1) OutlinedButton(onClick = { mergeId = s.id }) { Text(tr("Merge", "Voeg saam")) }
                         }
                     }
                 }
@@ -651,19 +814,29 @@ private fun PeopleTab(m: Meeting, af: Boolean, onRename: (Int, String) -> Unit, 
         }
     }
     renameId?.let { sid ->
-        var text by remember(sid) { mutableStateOf(m.speakerName(sid).let { if (it.startsWith("Person ")) "" else it }) }
+        var text by remember(sid) { mutableStateOf(m.speakerName(sid).let { if (com.bigoke.metings.data.isDefaultSpeakerName(it)) "" else it }) }
+        var rememberVoice by remember(sid) { mutableStateOf(true) }
+        val hasPrint = m.speaker(sid).voiceprint.isNotEmpty()
         AlertDialog(
             onDismissRequest = { renameId = null },
-            title = { Text(if (af) "Wie is ${m.speakerName(sid)}?" else "Who is ${m.speakerName(sid)}?") },
-            text = { OutlinedTextField(text, { text = it }, singleLine = true, placeholder = { Text("Name") }) },
-            confirmButton = { TextButton(onClick = { renameId = null; if (text.isNotBlank()) onRename(sid, text.trim()) }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = { renameId = null }) { Text("Cancel") } },
+            title = { Text(tr("Who is ${m.speakerName(sid)}?", "Wie is ${m.speakerName(sid)}?")) },
+            text = {
+                Column {
+                    OutlinedTextField(text, { text = it }, singleLine = true, placeholder = { Text(tr("Name", "Naam")) })
+                    if (hasPrint) Row(Modifier.clickable { rememberVoice = !rememberVoice }, verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = rememberVoice, onCheckedChange = { rememberVoice = it })
+                        Text(tr("Recognise this voice in future meetings", "Herken hierdie stem in toekomstige vergaderings"), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { renameId = null; if (text.isNotBlank()) onRename(sid, text.trim(), rememberVoice && hasPrint) }) { Text(tr("Save", "Stoor")) } },
+            dismissButton = { TextButton(onClick = { renameId = null }) { Text(tr("Cancel", "Kanselleer")) } },
         )
     }
     mergeId?.let { from ->
         AlertDialog(
             onDismissRequest = { mergeId = null },
-            title = { Text(if (af) "Voeg ${m.speakerName(from)} saam met…" else "Merge ${m.speakerName(from)} into…") },
+            title = { Text(tr("Merge ${m.speakerName(from)} into…", "Voeg ${m.speakerName(from)} saam met…")) },
             text = {
                 Column {
                     m.speakers.filter { it.id != from }.forEach { s ->
@@ -679,7 +852,7 @@ private fun PeopleTab(m: Meeting, af: Boolean, onRename: (Int, String) -> Unit, 
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { mergeId = null }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { mergeId = null }) { Text(tr("Cancel", "Kanselleer")) } },
         )
     }
 }
@@ -698,7 +871,7 @@ private fun EntitySheet(m: Meeting, e: Entity, af: Boolean, player: AudioPlayer,
         if (t.isEmpty()) "" else t.substring(s.coerceAtMost(t.length), end.coerceAtLeast(s)).trim()
     }
     val nearbyTime = m.entities.firstOrNull { it.type == EntityType.TIME && it.utterance == e.utterance }?.value
-    val actions = remember(e) { EntityActions.forEntity(e, m.title, sentence, nearbyTime, af) }
+    val actions = remember(e, af) { EntityActions.forEntity(e, m.title, sentence, nearbyTime, af) }
     val c = entityColor(e.type)
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
@@ -724,20 +897,17 @@ private fun EntitySheet(m: Meeting, e: Entity, af: Boolean, player: AudioPlayer,
             if (u != null) {
                 Button(onClick = { player.seekTo(u.startMs); onDismiss() }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.PlayArrow, null); Spacer(Modifier.width(6.dp))
-                    Text(if (af) "Speel hierdie oomblik" else "Play this moment")
+                    Text(tr("Play this moment", "Speel hierdie oomblik"))
                 }
                 Spacer(Modifier.height(8.dp))
             }
-            FlowRow2 {
-                actions.forEach { a -> OutlinedButton(onClick = { a.run(ctx) }) { Text(a.label) } }
-            }
+            FlowRow2 { actions.forEach { a -> OutlinedButton(onClick = { a.run(ctx) }) { Text(a.label) } } }
             if (e.type == EntityType.AMOUNT) {
                 Spacer(Modifier.height(12.dp))
                 val v = e.value.split(' ').getOrNull(1)?.toDoubleOrNull()
                 if (v != null && e.value.startsWith("ZAR")) {
                     Text(
-                        (if (af) "Sonder BTW (15%): " else "Excl. VAT (15%): ") + money("ZAR", v / 1.15) +
-                            "   ·   " + (if (af) "Met BTW: " else "Incl. VAT: ") + money("ZAR", v * 1.15),
+                        tr("Excl. VAT (15%): ", "Sonder BTW (15%): ") + money("ZAR", v / 1.15) + "   ·   " + tr("Incl. VAT: ", "Met BTW: ") + money("ZAR", v * 1.15),
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

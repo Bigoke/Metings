@@ -8,7 +8,7 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 
-/** Stores each meeting as a folder: meetings/<id>/meeting.json + audio file. */
+/** Stores each meeting as a folder: meetings/<id>/meeting.bin (encrypted) + audio file. */
 class MeetingRepository(context: Context) {
 
     private val root = File(context.filesDir, "meetings").apply { mkdirs() }
@@ -24,8 +24,14 @@ class MeetingRepository(context: Context) {
 
     fun reload() {
         val list = root.listFiles()?.mapNotNull { dir ->
-            val f = File(dir, "meeting.json")
-            if (!f.exists()) null else runCatching { json.decodeFromString<Meeting>(f.readText()) }.getOrNull()
+            val enc = File(dir, "meeting.bin")
+            val legacy = File(dir, "meeting.json")
+            when {
+                enc.exists() -> runCatching { json.decodeFromString<Meeting>(Crypto.decrypt(enc.readBytes())) }.getOrNull()
+                legacy.exists() -> runCatching { json.decodeFromString<Meeting>(legacy.readText()) }.getOrNull()
+                    ?.also { m -> runCatching { write(m); legacy.delete() } }
+                else -> null
+            }
         } ?: emptyList()
         _meetings.value = list.sortedByDescending { it.createdAt }
     }
@@ -38,12 +44,18 @@ class MeetingRepository(context: Context) {
 
     fun get(id: String): Meeting? = _meetings.value.firstOrNull { it.id == id }
 
+    private fun write(m: Meeting) {
+        val dir = folder(m.id)
+        val tmp = File(dir, "meeting.bin.tmp")
+        tmp.writeBytes(Crypto.encrypt(json.encodeToString(Meeting.serializer(), m)))
+        tmp.renameTo(File(dir, "meeting.bin"))
+    }
+
+    val folders: List<String> get() = _meetings.value.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted()
+
     fun save(m: Meeting) {
         synchronized(lock) {
-            val dir = folder(m.id)
-            val tmp = File(dir, "meeting.json.tmp")
-            tmp.writeText(json.encodeToString(Meeting.serializer(), m))
-            tmp.renameTo(File(dir, "meeting.json"))
+            write(m)
             _meetings.value = (_meetings.value.filterNot { it.id == m.id } + m).sortedByDescending { it.createdAt }
         }
     }

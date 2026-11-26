@@ -7,6 +7,7 @@ import com.bigoke.metings.data.Entity
 import com.bigoke.metings.data.EntityType
 import com.bigoke.metings.data.Meeting
 import com.bigoke.metings.data.Summary
+import com.bigoke.metings.data.Templates
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
@@ -180,20 +181,25 @@ class Summarizer(
                 }.joinToString("\n\n")
             }
             val known = keyFiguresFromEntities(meeting).take(12).joinToString("\n") { "- $it" }
+            val tpl = Templates.get(meeting.template)
+            val extraLayout = if (tpl.extraEn.isNotEmpty()) "EXTRA:\n- <${tpl.extraEn.lowercase()} item>\n" else ""
+            val extraInstr = if (tpl.instruction.isNotEmpty()) tpl.instruction + "\n\n" else ""
             val final = ask(
                 engine, system,
-                "Write the minutes of this meeting in $lang using EXACTLY this layout with these English headings:\n\n" +
+                extraInstr + "Write the minutes of this meeting in $lang using EXACTLY this layout with these English headings:\n\n" +
                     "OVERVIEW:\n<3 to 5 sentences describing the purpose and outcome of the meeting>\n" +
                     "DECISIONS:\n- <decision>\n" +
                     "ACTIONS:\n- <task> | <person responsible or blank> | <due date or blank>\n" +
                     "KEY FIGURES:\n- <important amount, number or date and what it is for>\n" +
-                    "FOLLOW-UPS:\n- <open question or item for the next meeting>\n\n" +
+                    "FOLLOW-UPS:\n- <open question or item for the next meeting>\n" + extraLayout + "\n" +
                     "Write 'None' under a heading if there is nothing for it. No other text.\n\n" +
                     (if (known.isNotEmpty()) "Details found in the transcript:\n$known\n\n" else "") +
                     (if (chunks.size == 1) "TRANSCRIPT:\n$notes" else "NOTES FROM THE MEETING:\n$notes")
             )
             onProgress(0.95f)
-            val parsed = parse(final, language)
+            val parsed = parse(final, language).let { p ->
+                if (tpl.extraEn.isEmpty()) p else p.copy(extraTitle = if (language == "af") tpl.extraAf else tpl.extraEn)
+            }
             if (parsed.overview.isBlank() && parsed.decisions.isEmpty() && parsed.actions.isEmpty()) {
                 return extractive(meeting, language).copy(overview = final.take(1500), engine = "gemma")
             }
@@ -219,6 +225,7 @@ class Summarizer(
         val headings = mapOf(
             "OVERVIEW" to "OVERVIEW", "DECISIONS" to "DECISIONS", "ACTIONS" to "ACTIONS",
             "KEY FIGURES" to "KEY FIGURES", "FOLLOW-UPS" to "FOLLOW-UPS", "FOLLOW UPS" to "FOLLOW-UPS",
+            "EXTRA" to "EXTRA",
         )
         for (raw in text.lines()) {
             val line = raw.trim().trim('*', '#').trim()
@@ -249,6 +256,7 @@ class Summarizer(
             actions = actions,
             keyFigures = items("KEY FIGURES"),
             followUps = items("FOLLOW-UPS"),
+            extra = items("EXTRA"),
             engine = "gemma",
             language = language,
         )
@@ -296,12 +304,17 @@ class Summarizer(
             ActionItem(e.text, owner, due)
         }
         val follow = sents.filter { it.text.endsWith("?") }.takeLast(5).map { "${meeting.speakerName(it.speaker)}: ${it.text}" }
+        val tpl = Templates.get(meeting.template)
+        val extra = if (tpl.keywords.isEmpty()) emptyList() else
+            sents.filter { s -> tpl.keywords.any { s.text.lowercase().contains(it) } }.take(10).map { it.text }
         return Summary(
             overview = overview,
             decisions = decisions,
             actions = actions,
             keyFigures = keyFiguresFromEntities(meeting),
             followUps = follow,
+            extraTitle = if (tpl.extraEn.isEmpty()) "" else if (language == "af") tpl.extraAf else tpl.extraEn,
+            extra = extra,
             engine = "extractive",
             language = language,
         )

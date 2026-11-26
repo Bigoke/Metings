@@ -2,7 +2,10 @@ package com.bigoke.metings.util
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
@@ -11,34 +14,46 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import androidx.core.content.FileProvider
 import com.bigoke.metings.MetingsApp
+import com.bigoke.metings.data.ActionItem
 import com.bigoke.metings.data.EntityType
 import com.bigoke.metings.data.Meeting
+import com.bigoke.metings.data.Templates
 import com.bigoke.metings.ui.entityLabel
-import com.bigoke.metings.ui.formatDate
 import com.bigoke.metings.ui.formatDuration
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 object Exporter {
 
-    private fun safeName(m: Meeting) = m.title.replace(Regex("""[^\p{L}\d _-]"""), "").trim().ifEmpty { "meeting" }.take(60)
+    fun logoFile(ctx: Context) = File(ctx.filesDir, "company_logo.png")
+
+    private fun safeName(m: Meeting) = m.title.replace(Regex("""[^\p{L}\d _-]"""), "").trim().ifEmpty { "notule" }.take(60)
+
+    private fun docAf(m: Meeting) = (m.summary?.language ?: m.language) == "af"
+
+    private fun date(ms: Long, af: Boolean) =
+        SimpleDateFormat("EEEE d MMMM yyyy", if (af) Locale("af", "ZA") else Locale("en", "ZA")).format(Date(ms))
+
+    private fun time(ms: Long) = SimpleDateFormat("HH:mm", Locale.ROOT).format(Date(ms))
 
     fun asText(m: Meeting): String {
-        val af = m.language == "af"
+        val af = docAf(m)
         val sb = StringBuilder()
-        sb.appendLine(m.title).appendLine(formatDate(m.createdAt) + " · " + formatDuration(m.durationMs))
-        sb.appendLine((if (af) "Deelnemers: " else "Participants: ") + m.speakers.joinToString(", ") { it.name })
+        val company = MetingsApp.instance.prefs.settings.value.companyName
+        if (company.isNotBlank()) sb.appendLine(company)
+        sb.appendLine((if (af) "NOTULE: " else "MINUTES: ") + m.title)
+        sb.appendLine(date(m.createdAt, af) + " · " + time(m.createdAt) + " · " + formatDuration(m.durationMs))
+        sb.appendLine((if (af) "Teenwoordig: " else "Present: ") + m.speakers.joinToString(", ") { it.name })
         sb.appendLine()
         m.summary?.let { s ->
             sb.appendLine(if (af) "OPSOMMING" else "SUMMARY").appendLine(s.overview).appendLine()
             if (s.decisions.isNotEmpty()) { sb.appendLine(if (af) "BESLUITE" else "DECISIONS"); s.decisions.forEach { sb.appendLine("• $it") }; sb.appendLine() }
+            if (s.extra.isNotEmpty()) { sb.appendLine(s.extraTitle.uppercase()); s.extra.forEach { sb.appendLine("• $it") }; sb.appendLine() }
             if (s.actions.isNotEmpty()) {
                 sb.appendLine(if (af) "AKSIEPUNTE" else "ACTION ITEMS")
-                s.actions.forEach { a ->
-                    sb.append("☐ ").append(a.text)
-                    if (a.owner.isNotBlank()) sb.append(" — ").append(a.owner)
-                    if (a.due.isNotBlank()) sb.append(" (").append(a.due).append(")")
-                    sb.appendLine()
-                }
+                s.actions.forEach { a -> sb.appendLine(actionLine(a)) }
                 sb.appendLine()
             }
             if (s.keyFigures.isNotEmpty()) { sb.appendLine(if (af) "SLEUTELSYFERS" else "KEY FIGURES"); s.keyFigures.forEach { sb.appendLine("• $it") }; sb.appendLine() }
@@ -53,79 +68,204 @@ object Exporter {
             sb.appendLine()
         }
         sb.appendLine(if (af) "TRANSKRIPSIE" else "TRANSCRIPT")
-        m.utterances.forEach { u ->
-            sb.appendLine("[${formatDuration(u.startMs)}] ${m.speakerName(u.speaker)}: ${u.text}")
-        }
+        m.utterances.forEach { u -> sb.appendLine("[${formatDuration(u.startMs)}] ${m.speakerName(u.speaker)}: ${u.text}") }
         return sb.toString()
     }
 
-    fun pdf(ctx: Context, m: Meeting): File {
-        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
-        val out = File(dir, safeName(m) + ".pdf")
-        val doc = PdfDocument()
-        val pageW = 595; val pageH = 842; val margin = 48
-        val width = pageW - margin * 2
-        val body = TextPaint().apply { textSize = 10.5f; color = Color.rgb(30, 32, 38); isAntiAlias = true }
-        val title = TextPaint(body).apply { textSize = 20f; typeface = Typeface.DEFAULT_BOLD; color = Color.rgb(20, 33, 61) }
-        val heading = TextPaint(body).apply { textSize = 12f; typeface = Typeface.DEFAULT_BOLD; color = Color.rgb(14, 138, 126) }
-        val muted = TextPaint(body).apply { color = Color.rgb(100, 106, 120); textSize = 9.5f }
+    private fun actionLine(a: ActionItem): String {
+        val sb = StringBuilder(if (a.done) "☑ " else "☐ ").append(a.text)
+        if (a.owner.isNotBlank()) sb.append(" — ").append(a.owner)
+        if (a.due.isNotBlank()) sb.append(" (").append(a.due).append(")")
+        return sb.toString()
+    }
 
+    // --------------------------------------------------------------------------- branded PDF minutes
+
+    private class Pdf(val ctx: Context, val footerLeft: String, val pageLabel: String) {
+        val doc = PdfDocument()
+        val w = 595; val h = 842; val margin = 50f
+        val width = w - margin * 2
         var pageNo = 0
-        var page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, ++pageNo).create())
-        var y = margin.toFloat()
+        lateinit var page: PdfDocument.Page
+        var y = 0f
+        val ink = Color.rgb(20, 33, 61)
+        val teal = Color.rgb(14, 138, 126)
+        val grey = Color.rgb(100, 106, 120)
+        val body = TextPaint().apply { textSize = 10.5f; color = Color.rgb(30, 32, 38); isAntiAlias = true }
+        val bold = TextPaint(body).apply { typeface = Typeface.DEFAULT_BOLD }
+        val small = TextPaint(body).apply { textSize = 8.5f; color = grey }
+        val heading = TextPaint(body).apply { textSize = 11.5f; typeface = Typeface.DEFAULT_BOLD; color = Color.WHITE; letterSpacing = 0.06f }
+        val line = Paint().apply { color = Color.rgb(210, 214, 222); strokeWidth = 0.8f }
+
+        init { newPage() }
 
         fun newPage() {
-            doc.finishPage(page)
-            page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, ++pageNo).create())
-            y = margin.toFloat()
-        }
-        fun draw(text: String, paint: TextPaint, spaceAfter: Float = 6f, indent: Int = 0) {
-            val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, width - indent)
-                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(2f, 1f).build()
-            var line = 0
-            while (line < layout.lineCount) {
-                val lineH = (layout.getLineBottom(line) - layout.getLineTop(line)).toFloat()
-                if (y + lineH > pageH - margin) newPage()
-                val c = page.canvas
-                c.save()
-                c.translate((margin + indent).toFloat(), y - layout.getLineTop(line))
-                c.clipRect(0f, layout.getLineTop(line).toFloat(), (width - indent).toFloat(), layout.getLineBottom(line).toFloat())
-                layout.draw(c)
-                c.restore()
-                y += lineH
-                line++
-            }
-            y += spaceAfter
+            if (pageNo > 0) { footer(); doc.finishPage(page) }
+            page = doc.startPage(PdfDocument.PageInfo.Builder(w, h, ++pageNo).create())
+            y = margin
         }
 
-        val af = m.language == "af"
-        draw(m.title, title, 4f)
-        draw(formatDate(m.createdAt) + "  ·  " + formatDuration(m.durationMs) + "  ·  " + m.speakers.joinToString(", ") { it.name }, muted, 16f)
-        m.summary?.let { s ->
-            draw(if (af) "Opsomming" else "Summary", heading)
-            draw(s.overview, body, 12f)
-            if (s.decisions.isNotEmpty()) { draw(if (af) "Besluite" else "Decisions", heading); s.decisions.forEach { draw("•  $it", body, 3f, 8) }; y += 9f }
-            if (s.actions.isNotEmpty()) {
-                draw(if (af) "Aksiepunte" else "Action items", heading)
-                s.actions.forEach { a ->
-                    val extra = listOfNotNull(a.owner.takeIf { it.isNotBlank() }, a.due.takeIf { it.isNotBlank() }).joinToString(" · ")
-                    draw("☐  ${a.text}" + if (extra.isNotEmpty()) "  —  $extra" else "", body, 3f, 8)
-                }
-                y += 9f
+        fun footer() {
+            val c = page.canvas
+            c.drawLine(margin, h - 36f, w - margin, h - 36f, line)
+            c.drawText(footerLeft, margin, h - 24f, small)
+            val p = "$pageLabel $pageNo"
+            c.drawText(p, w - margin - small.measureText(p), h - 24f, small)
+        }
+
+        fun layout(text: String, paint: TextPaint, width: Float): StaticLayout =
+            StaticLayout.Builder.obtain(text, 0, text.length, paint, width.toInt().coerceAtLeast(10))
+                .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(1.5f, 1f).build()
+
+        fun ensure(height: Float) { if (y + height > h - margin - 20) newPage() }
+
+        fun text(t: String, paint: TextPaint = body, indent: Float = 0f, after: Float = 5f) {
+            val l = layout(t, paint, width - indent)
+            var i = 0
+            while (i < l.lineCount) {
+                val lh = (l.getLineBottom(i) - l.getLineTop(i)).toFloat()
+                ensure(lh)
+                val c = page.canvas
+                c.save()
+                c.translate(margin + indent, y - l.getLineTop(i))
+                c.clipRect(0f, l.getLineTop(i).toFloat(), width - indent, l.getLineBottom(i).toFloat())
+                l.draw(c)
+                c.restore()
+                y += lh; i++
             }
-            if (s.keyFigures.isNotEmpty()) { draw(if (af) "Sleutelsyfers" else "Key figures", heading); s.keyFigures.forEach { draw("•  $it", body, 3f, 8) }; y += 9f }
-            if (s.followUps.isNotEmpty()) { draw(if (af) "Opvolging" else "Follow-ups", heading); s.followUps.forEach { draw("•  $it", body, 3f, 8) }; y += 9f }
+            y += after
         }
-        draw(if (af) "Transkripsie" else "Transcript", heading)
-        m.utterances.forEach { u ->
-            draw("${formatDuration(u.startMs)}   ${m.speakerName(u.speaker)}", muted, 1f)
-            draw(u.text, body, 8f)
+
+        fun sectionBar(title: String) {
+            ensure(60f)
+            y += 6f
+            val c = page.canvas
+            val p = Paint().apply { color = ink; isAntiAlias = true }
+            c.drawRoundRect(RectF(margin, y, w - margin, y + 20f), 3f, 3f, p)
+            c.drawText(title.uppercase(), margin + 8f, y + 14f, heading)
+            y += 28f
         }
-        doc.finishPage(page)
-        out.outputStream().use { doc.writeTo(it) }
-        doc.close()
+
+        fun bullet(t: String) {
+            val c0 = y
+            text(t, body, 14f, 3f)
+            val c = page.canvas
+            if (y > c0) c.drawCircle(margin + 5f, c0 + 7f, 1.8f, Paint().apply { color = teal; isAntiAlias = true })
+        }
+
+        /** A simple table; [weights] are relative column widths. */
+        fun table(headers: List<String>, rows: List<List<String>>, weights: List<Float>) {
+            val total = weights.sum()
+            val cols = weights.map { it / total * width }
+            fun row(cells: List<String>, paint: TextPaint, fill: Int?) {
+                val layouts = cells.mapIndexed { i, t -> layout(t, paint, cols[i] - 10f) }
+                val rh = (layouts.maxOf { it.height } + 10).toFloat()
+                ensure(rh)
+                val c = page.canvas
+                if (fill != null) c.drawRect(margin, y, w - margin, y + rh, Paint().apply { color = fill })
+                var x = margin
+                layouts.forEachIndexed { i, l ->
+                    c.save(); c.translate(x + 5f, y + 5f); l.draw(c); c.restore()
+                    x += cols[i]
+                }
+                c.drawLine(margin, y + rh, w - margin, y + rh, line)
+                y += rh
+            }
+            row(headers, bold, Color.rgb(237, 239, 243))
+            rows.forEach { row(it, body, null) }
+            y += 8f
+        }
+
+        fun finish(out: File) {
+            footer(); doc.finishPage(page)
+            out.outputStream().use { doc.writeTo(it) }
+            doc.close()
+        }
+    }
+
+    fun pdf(ctx: Context, m: Meeting, includeTranscript: Boolean = true): File {
+        val af = docAf(m)
+        val settings = MetingsApp.instance.prefs.settings.value
+        val company = settings.companyName.trim()
+        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
+        val out = File(dir, safeName(m) + ".pdf")
+        val pdf = Pdf(ctx, (if (company.isNotEmpty()) "$company · " else "") + (if (af) "Notule opgestel met Notule" else "Minutes prepared with Notule"),
+            if (af) "Bladsy" else "Page")
+
+        // Letterhead
+        val c = pdf.page.canvas
+        var textX = pdf.margin
+        val logo = logoFile(ctx)
+        if (logo.exists()) runCatching {
+            val bmp = BitmapFactory.decodeFile(logo.absolutePath)
+            val hgt = 48f
+            val wid = hgt * bmp.width / bmp.height
+            c.drawBitmap(bmp, null, RectF(pdf.margin, pdf.y, pdf.margin + wid, pdf.y + hgt), Paint(Paint.FILTER_BITMAP_FLAG))
+            textX = pdf.margin + wid + 14f
+        }
+        val coPaint = TextPaint(pdf.bold).apply { textSize = 15f; color = pdf.ink }
+        val docTitle = TextPaint(pdf.bold).apply { textSize = 22f; color = pdf.teal; letterSpacing = 0.12f }
+        if (company.isNotEmpty()) c.drawText(company, textX, pdf.y + 18f, coPaint)
+        c.drawText(if (af) "NOTULE" else "MINUTES", textX, pdf.y + 44f, docTitle)
+        pdf.y += 60f
+        c.drawRect(pdf.margin, pdf.y, pdf.w - pdf.margin, pdf.y + 2.5f, Paint().apply { color = pdf.teal })
+        pdf.y += 14f
+        pdf.text(m.title, TextPaint(pdf.bold).apply { textSize = 16f; color = pdf.ink }, after = 8f)
+
+        val tpl = Templates.get(m.template)
+        val details = buildList {
+            add(listOf(if (af) "Datum" else "Date", date(m.createdAt, af)))
+            add(listOf(if (af) "Tyd" else "Time", time(m.createdAt) + "  (" + formatDuration(m.durationMs) + ")"))
+            if (tpl.id != "general") add(listOf(if (af) "Soort" else "Type", if (af) tpl.af else tpl.en))
+            add(listOf(if (af) "Teenwoordig" else "Present", m.speakers.joinToString(", ") { it.name }))
+            if (settings.preparedBy.isNotBlank()) add(listOf(if (af) "Opgestel deur" else "Prepared by", settings.preparedBy))
+        }
+        pdf.table(listOf(if (af) "Besonderheid" else "Item", ""), details, listOf(1f, 3.2f))
+
+        m.summary?.let { s ->
+            pdf.sectionBar(if (af) "Opsomming" else "Summary")
+            pdf.text(s.overview.ifBlank { "—" }, after = 8f)
+            if (s.decisions.isNotEmpty()) { pdf.sectionBar(if (af) "Besluite" else "Decisions"); s.decisions.forEach { pdf.bullet(it) } }
+            if (s.extra.isNotEmpty()) { pdf.sectionBar(s.extraTitle); s.extra.forEach { pdf.bullet(it) } }
+            if (s.actions.isNotEmpty()) {
+                pdf.sectionBar(if (af) "Aksiepunte" else "Action items")
+                pdf.table(
+                    listOf("#", if (af) "Taak" else "Task", if (af) "Verantwoordelik" else "Responsible", if (af) "Teen" else "Due", "✓"),
+                    s.actions.mapIndexed { i, a -> listOf("${i + 1}", a.text, a.owner, a.due, if (a.done) "✓" else "") },
+                    listOf(0.35f, 4f, 1.6f, 1.2f, 0.4f),
+                )
+            }
+            if (s.keyFigures.isNotEmpty()) { pdf.sectionBar(if (af) "Sleutelsyfers" else "Key figures"); s.keyFigures.forEach { pdf.bullet(it) } }
+            if (s.followUps.isNotEmpty()) { pdf.sectionBar(if (af) "Opvolging" else "Follow-ups"); s.followUps.forEach { pdf.bullet(it) } }
+        }
+
+        // Signatures
+        pdf.ensure(110f)
+        pdf.y += 24f
+        val sc = pdf.page.canvas
+        val colW = (pdf.width - 30f) / 2
+        listOf(if (af) "Voorsitter" else "Chairperson", if (af) "Sekretaris" else "Secretary").forEachIndexed { i, label ->
+            val x = pdf.margin + i * (colW + 30f)
+            sc.drawLine(x, pdf.y + 30f, x + colW, pdf.y + 30f, Paint().apply { color = pdf.ink; strokeWidth = 0.8f })
+            sc.drawText(label, x, pdf.y + 44f, pdf.small)
+            sc.drawLine(x, pdf.y + 74f, x + colW * 0.55f, pdf.y + 74f, Paint().apply { color = pdf.ink; strokeWidth = 0.8f })
+            sc.drawText(if (af) "Datum" else "Date", x, pdf.y + 88f, pdf.small)
+        }
+        pdf.y += 100f
+
+        if (includeTranscript && m.utterances.isNotEmpty()) {
+            pdf.newPage()
+            pdf.sectionBar(if (af) "Bylae: transkripsie" else "Appendix: transcript")
+            m.utterances.forEach { u ->
+                pdf.text("${formatDuration(u.startMs)}   ${m.speakerName(u.speaker)}", TextPaint(pdf.small).apply { typeface = Typeface.DEFAULT_BOLD }, after = 1f)
+                pdf.text(u.text, after = 7f)
+            }
+        }
+        pdf.finish(out)
         return out
     }
+
+    // --------------------------------------------------------------------------- sharing
 
     private fun uri(ctx: Context, f: File): Uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
 
@@ -141,6 +281,7 @@ object Exporter {
                 uris += uri(ctx, copy)
             }
         }
+        if (uris.isEmpty()) return
         val intent = if (uris.size == 1) {
             Intent(Intent.ACTION_SEND).setType(if (includePdf) "application/pdf" else "audio/*").putExtra(Intent.EXTRA_STREAM, uris[0])
         } else {
@@ -156,20 +297,46 @@ object Exporter {
         ctx.startActivity(Intent.createChooser(i, m.title).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    /** Sends one person their action items (WhatsApp, e-mail, SMS… via the share sheet). */
+    fun shareTasks(ctx: Context, m: Meeting, owner: String) {
+        val af = docAf(m)
+        val tasks = m.summary?.actions.orEmpty().filter { !it.done && (owner.isEmpty() || it.owner.equals(owner, true)) }
+        if (tasks.isEmpty()) return
+        val greeting = if (owner.isNotBlank()) (if (af) "Hallo $owner,\n\n" else "Hi $owner,\n\n") else ""
+        val body = greeting +
+            (if (af) "Jou aksiepunte uit \"${m.title}\" (${date(m.createdAt, true)}):\n" else "Your action items from \"${m.title}\" (${date(m.createdAt, false)}):\n") +
+            tasks.joinToString("\n") { "• " + it.text + if (it.due.isNotBlank()) " — ${if (af) "teen" else "by"} ${it.due}" else "" } +
+            (if (af) "\n\nDankie!" else "\n\nThank you!")
+        val i = Intent(Intent.ACTION_SEND).setType("text/plain")
+            .putExtra(Intent.EXTRA_SUBJECT, (if (af) "Aksiepunte: " else "Action items: ") + m.title)
+            .putExtra(Intent.EXTRA_TEXT, body)
+        ctx.startActivity(Intent.createChooser(i, owner.ifBlank { m.title }).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
     /** Word-compatible document: an HTML file Word opens directly as .doc. */
     fun shareWord(ctx: Context, m: Meeting) {
         val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
         val f = File(dir, safeName(m) + ".doc")
         val esc = { s: String -> s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") }
         val html = StringBuilder("<html><head><meta charset='utf-8'></head><body style='font-family:Calibri,Arial'>")
-        asText(m).lines().forEach { line ->
-            if (line.isNotEmpty() && line == line.uppercase() && line.any { it.isLetter() }) html.append("<h3 style='color:#0E8A7E'>").append(esc(line)).append("</h3>")
-            else html.append("<p style='margin:2px 0'>").append(esc(line)).append("</p>")
+        asText(m).lines().forEach { l ->
+            if (l.isNotEmpty() && l == l.uppercase() && l.any { it.isLetter() }) html.append("<h3 style='color:#0E8A7E'>").append(esc(l)).append("</h3>")
+            else html.append("<p style='margin:2px 0'>").append(esc(l)).append("</p>")
         }
         html.append("</body></html>")
         f.writeText(html.toString())
         val i = Intent(Intent.ACTION_SEND).setType("application/msword").putExtra(Intent.EXTRA_STREAM, uri(ctx, f))
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         ctx.startActivity(Intent.createChooser(i, m.title).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    fun shareDiagnostics(ctx: Context, report: String) {
+        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
+        val f = File(dir, "notule-diagnostics.txt")
+        f.writeText(report)
+        val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri(ctx, f))
+            .putExtra(Intent.EXTRA_SUBJECT, "Notule diagnostic report").putExtra(Intent.EXTRA_TEXT, report.take(3000))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        ctx.startActivity(Intent.createChooser(i, "Notule").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 }

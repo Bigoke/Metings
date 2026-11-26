@@ -14,7 +14,10 @@ import java.util.Locale
  * phone numbers, e-mail addresses, colours, shapes, measurements and tasks. Rule based with fuzzy
  * matching so that slightly misspelt words from speech recognition still match.
  */
-class EntityExtractor(meetingTime: Long) {
+class EntityExtractor(meetingTime: Long, vocabulary: List<String> = emptyList()) {
+
+    /** The user's own names and terms (folded) -> spelling, recognised as names. */
+    private val vocab: Map<String, String> = vocabulary.filter { it.isNotBlank() }.associateBy { Fuzzy.fold(it.trim()) }
 
     private val today: LocalDate = Instant.ofEpochMilli(meetingTime).atZone(ZoneId.systemDefault()).toLocalDate()
 
@@ -81,7 +84,7 @@ class EntityExtractor(meetingTime: Long) {
 
     fun extract(utterances: List<Utterance>, speakerNames: Map<Int, String>): List<Entity> {
         val out = ArrayList<Entity>()
-        val knownNames = speakerNames.values.filterNot { it.startsWith("Person ") }.map { Fuzzy.fold(it) }.toSet()
+        val knownNames = speakerNames.values.filterNot { com.bigoke.metings.data.isDefaultSpeakerName(it) }.map { Fuzzy.fold(it) }.toSet()
         utterances.forEachIndexed { ui, u ->
             out += extractOne(ui, u, speakerNames, knownNames)
         }
@@ -99,6 +102,7 @@ class EntityExtractor(meetingTime: Long) {
         percentsAndMeasures(c)
         addresses(c)
         val toks = Regex("""[\p{L}\d][\p{L}\d'’-]*""").findAll(text).map { Tok(it.range.first, it.range.last + 1, it.value) }.toList()
+        vocabulary(c)
         numberWords(c, toks)
         digits(c)
         colours(c, toks)
@@ -219,6 +223,27 @@ class EntityExtractor(meetingTime: Long) {
         Regex("""(?i)\bhalf\s+([\p{L}\d]+)\b""").findAll(t).forEach { m ->
             val v = m.groupValues[1].toIntOrNull()?.toLong() ?: NumberWords.wordValue(m.groupValues[1]) ?: return@forEach
             if (v in 1..12) c.add(EntityType.TIME, m.range.first, m.range.last + 1, "%02d:30".format(Locale.ROOT, (v - 1).toInt()))
+        }
+    }
+
+    private fun vocabulary(c: Ctx) {
+        if (vocab.isEmpty()) return
+        val folded = Fuzzy.fold(c.text)
+        // Fold keeps string length for Latin text; fall back to case-insensitive search otherwise.
+        val sameLength = folded.length == c.text.length
+        for ((key, term) in vocab.entries.sortedByDescending { it.key.length }) {
+            var from = 0
+            while (true) {
+                val idx = if (sameLength) folded.indexOf(key, from) else c.text.indexOf(term, from, ignoreCase = true)
+                if (idx < 0) break
+                val end = idx + key.length
+                val before = c.text.getOrNull(idx - 1)
+                val after = c.text.getOrNull(end)
+                if ((before == null || !before.isLetterOrDigit()) && (after == null || !after.isLetterOrDigit())) {
+                    c.add(EntityType.PERSON, idx, end, term)
+                }
+                from = end
+            }
         }
     }
 

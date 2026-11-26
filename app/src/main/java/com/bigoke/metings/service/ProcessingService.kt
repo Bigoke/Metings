@@ -15,6 +15,7 @@ import com.bigoke.metings.MainActivity
 import com.bigoke.metings.MetingsApp
 import com.bigoke.metings.R
 import com.bigoke.metings.data.MeetingStatus
+import com.bigoke.metings.util.Ui
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -55,7 +56,7 @@ class ProcessingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ServiceCompat.startForeground(this, NOTIF_ID, progressNotification("Preparing…", 0f), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        ServiceCompat.startForeground(this, NOTIF_ID, progressNotification(Ui.t("Preparing…", "Berei voor…"), 0f), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         val app = application as MetingsApp
         if (intent?.action == ACTION_CANCEL) {
             queue.clear()
@@ -113,21 +114,21 @@ class ProcessingService : Service() {
         )
         return NotificationCompat.Builder(this, MetingsApp.CH_PROCESS)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle(currentTitle.ifEmpty { "Processing meeting" })
+            .setContentTitle(currentTitle.ifEmpty { Ui.t("Processing meeting", "Verwerk vergadering") })
             .setContentText("$stage · ${(overall * 100).toInt()}%")
             .setProgress(100, (overall * 100).toInt(), false)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openIntent(null))
-            .addAction(0, "Stop", stop)
+            .addAction(0, Ui.t("Stop", "Stop"), stop)
             .build()
     }
 
     private fun notifyDone(id: String, title: String) {
         val n = NotificationCompat.Builder(this, MetingsApp.CH_DONE)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle("Meeting ready")
-            .setContentText("$title — transcript and summary are ready")
+            .setContentTitle(Ui.t("Minutes ready", "Notule gereed"))
+            .setContentText(title + Ui.t(" — transcript and summary are ready", " — transkripsie en opsomming is gereed"))
             .setAutoCancel(true)
             .setContentIntent(openIntent(id))
             .build()

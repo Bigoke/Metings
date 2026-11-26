@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import com.bigoke.metings.data.MeetingRepository
 import com.bigoke.metings.data.MeetingStatus
 import com.bigoke.metings.data.Prefs
+import com.bigoke.metings.data.VoiceBank
 import com.bigoke.metings.engine.ModelManager
 import com.bigoke.metings.engine.Pipeline
 
@@ -19,20 +20,26 @@ class MetingsApp : Application() {
         private set
     lateinit var pipeline: Pipeline
         private set
+    lateinit var voices: VoiceBank
+        private set
 
     override fun onCreate() {
         super.onCreate()
         instance = this
+        com.bigoke.metings.util.EngineGuard.install(this)
         repo = MeetingRepository(this)
         prefs = Prefs(this)
         models = ModelManager(this)
-        pipeline = Pipeline(this, repo, models, prefs)
+        voices = VoiceBank(this)
+        pipeline = Pipeline(this, repo, models, prefs, voices)
 
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CH_RECORD, "Recording", NotificationManager.IMPORTANCE_LOW))
-        nm.createNotificationChannel(NotificationChannel(CH_PROCESS, "Processing meetings", NotificationManager.IMPORTANCE_LOW))
-        nm.createNotificationChannel(NotificationChannel(CH_DONE, "Meeting ready", NotificationManager.IMPORTANCE_DEFAULT))
+        nm.createNotificationChannel(NotificationChannel(CH_RECORD, "Opname / Recording", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(CH_PROCESS, "Verwerking / Processing", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(CH_DONE, "Notule gereed / Minutes ready", NotificationManager.IMPORTANCE_DEFAULT))
 
+        // If the app was closed while a step was running, count it (the next try uses safe mode).
+        com.bigoke.metings.util.EngineGuard.recoverAfterCrash()
         // A meeting left "processing" or "recording" by a crash / reboot is put back in the queue.
         repo.meetings.value.forEach { m ->
             if (m.status == MeetingStatus.PROCESSING || m.status == MeetingStatus.RECORDING) {

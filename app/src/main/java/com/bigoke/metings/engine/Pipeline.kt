@@ -8,6 +8,9 @@ import com.bigoke.metings.data.MeetingStatus
 import com.bigoke.metings.data.Prefs
 import com.bigoke.metings.data.Speaker
 import com.bigoke.metings.data.Utterance
+import com.bigoke.metings.data.VoiceBank
+import com.bigoke.metings.util.EngineGuard
+import com.bigoke.metings.util.Ui
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
@@ -23,6 +26,7 @@ class Pipeline(
     private val repo: MeetingRepository,
     private val models: ModelManager,
     private val prefs: Prefs,
+    private val voices: VoiceBank,
 ) {
     companion object {
         private const val TAG = "Pipeline"
@@ -65,23 +69,45 @@ class Pipeline(
         val started = System.currentTimeMillis()
         repo.get(id) ?: return
         val settings = prefs.settings.value
+        // Safe mode after an earlier crash or out-of-memory close in a specific step.
+        val crashes = EngineGuard.crashes(id)
+        val crashedIn = EngineGuard.lastStage(id)
+        if (crashes >= EngineGuard.MAX_CRASHES) {
+            repo.update(id) {
+                it.copy(status = MeetingStatus.FAILED, error = Ui.t(
+                    "Notule closed unexpectedly while ${EngineGuard.stageLabel(crashedIn)}. Tap Retry, or send a diagnostic report from Settings.",
+                    "Notule het onverwags gesluit terwyl dit ${EngineGuard.stageLabel(crashedIn)}. Tik Probeer weer, of stuur 'n diagnoseverslag uit Instellings.",
+                ))
+            }
+            return
+        }
+        val safe = crashes > 0
+        val threads = if (safe) settings.threads.coerceAtMost(4) else settings.threads
+        val beam = if (safe && crashedIn == EngineGuard.TRANSCRIBE) 1 else settings.beamSize
+        val diarThreads = if (safe && crashedIn == EngineGuard.VOICES) 1 else threads.coerceAtMost(4)
+        val aiCrashed = crashedIn == EngineGuard.PUNCTUATE || crashedIn == EngineGuard.SUMMARY
+        val useGpu = settings.useGpuForSummary && !(safe && aiCrashed)
+        val skipAi = aiCrashed && crashes >= 2
+        if (safe) EngineGuard.log("safe mode for $id: crashed in $crashedIn x$crashes; threads=$threads beam=$beam gpu=$useGpu skipAi=$skipAi")
         try {
             repo.update(id) { it.copy(status = MeetingStatus.PROCESSING, error = null) }
             var m = repo.get(id)!!
-            if (!redoSummaryOnly) m = transcribeMeeting(m, settings.removeFillers, settings.threads, settings.beamSize)
+            val keepTranscript = safe && aiCrashed && m.utterances.isNotEmpty()
+            if (!redoSummaryOnly && !keepTranscript) m = transcribeMeeting(m, settings.removeFillers, threads, beam, diarThreads)
             if (cancelled) throw InterruptedException("Stopped")
 
-            val llm = if (models.isReady(ModelKind.SUMMARY)) models.file(ModelKind.SUMMARY) else null
-            val summarizer = Summarizer(context, llm, settings.useGpuForSummary)
+            val llm = if (!skipAi && models.isReady(ModelKind.SUMMARY)) models.file(ModelKind.SUMMARY) else null
+            val summarizer = Summarizer(context, llm, useGpu)
             try {
             // Readability: restore punctuation and capitals where the speech model left them out
-            if (!redoSummaryOnly && llm != null) {
+            if (!redoSummaryOnly && !keepTranscript && llm != null) {
+                EngineGuard.begin(id, EngineGuard.PUNCTUATE)
                 report(id, "Adding punctuation", 0f, 0.80f, 0.86f)
                 val fixed = summarizer.punctuate(m.utterances.map { it.text }, m.language) { f ->
                     report(id, "Adding punctuation", f, 0.80f, 0.86f)
                 }
                 m = m.copy(utterances = m.utterances.mapIndexed { i, u ->
-                    u.copy(text = TextCleaner.clean(fixed.getOrElse(i) { u.text }, m.language, false))
+                    u.copy(text = TextCleaner.clean(fixed.getOrElse(i) { u.text }, m.language, false, settings.vocabulary))
                 })
                 repo.save(m)
             }
@@ -90,11 +116,12 @@ class Pipeline(
             // Details
             report(id, "Finding details", 0.5f, 0.86f, 0.88f)
             val names = m.speakers.associate { it.id to it.name }
-            m = m.copy(entities = EntityExtractor(m.createdAt).extract(m.utterances, names))
+            m = m.copy(entities = EntityExtractor(m.createdAt, settings.vocabulary).extract(m.utterances, names))
             repo.save(m)
 
             // Summary
             val sumLang = if (settings.summaryLanguage == "same") m.language else settings.summaryLanguage
+            EngineGuard.begin(id, EngineGuard.SUMMARY)
             report(id, "Writing summary", 0f, 0.88f, 0.98f)
             val summary = summarizer.summarize(m, sumLang) { f ->
                 report(id, "Writing summary", f, 0.88f, 0.98f)
@@ -107,6 +134,7 @@ class Pipeline(
 
             // Keep the audio as a compact attachment
             if (m.audioFile.endsWith(".wav")) {
+                EngineGuard.begin(id, EngineGuard.AUDIO)
                 report(id, "Saving audio", 0.5f, 0.98f, 1f)
                 val wav = repo.audio(m)
                 val m4a = File(repo.folder(id), "audio.m4a")
@@ -121,18 +149,22 @@ class Pipeline(
             }
             val secs = (System.currentTimeMillis() - started) / 1000
             repo.save(m.copy(status = MeetingStatus.READY, processingSeconds = if (redoSummaryOnly) m.processingSeconds else secs))
+            EngineGuard.clear(id)
+            EngineGuard.log("done $id in ${secs}s")
         } catch (t: Throwable) {
             Log.e(TAG, "Processing failed", t)
+            EngineGuard.log("failed $id: ${Log.getStackTraceString(t).take(3000)}")
             val msg = if (cancelled) "Processing was stopped. Tap Process again to restart." else (t.message ?: t.javaClass.simpleName)
             repo.update(id) { it.copy(status = MeetingStatus.FAILED, error = msg) }
         } finally {
+            EngineGuard.end()
             transcriber?.close()
             transcriber = null
             clear(id)
         }
     }
 
-    private fun transcribeMeeting(m0: Meeting, removeFillers: Boolean, threads: Int, beam: Int): Meeting {
+    private fun transcribeMeeting(m0: Meeting, removeFillers: Boolean, threads: Int, beam: Int, diarThreads: Int): Meeting {
         val id = m0.id
         if (!models.coreReady) throw IllegalStateException("The speech models are not downloaded yet. Open Models to download them.")
         val wav = repo.audio(m0)
@@ -147,7 +179,8 @@ class Pipeline(
         report(id, "Recognising voices", 0f, 0.02f, 0.25f)
         val block = BLOCK_MINUTES * 60 * SAMPLE_RATE
         val nBlocks = ((totalSamples + block - 1) / block).coerceAtLeast(1)
-        val diarizer = Diarizer(models.file(ModelKind.SEGMENT), models.file(ModelKind.VOICEPRINT), threads.coerceAtMost(4))
+        EngineGuard.begin(id, EngineGuard.VOICES)
+        val diarizer = Diarizer(models.file(ModelKind.SEGMENT), models.file(ModelKind.VOICEPRINT), diarThreads)
         val turns = ArrayList<SpeakerTurn>()
         val globalPrints = ArrayList<FloatArray>()
         try {
@@ -159,23 +192,19 @@ class Pipeline(
                     report(id, "Recognising voices", (b + f) / nBlocks, 0.02f, 0.25f)
                 }
                 val mapping = HashMap<Int, Int>()
-                if (nBlocks == 1) {
-                    local.map { it.speaker }.distinct().forEach { mapping[it] = it }
-                } else {
-                    val prints = diarizer.voiceprints(samples, local)
-                    for (spk in local.map { it.speaker }.distinct()) {
-                        val p = prints[spk]
-                        var best = -1; var bestSim = 0.5f
-                        if (p != null) globalPrints.forEachIndexed { gi, g ->
-                            val sim = cosine(p, g)
-                            if (sim > bestSim && gi !in mapping.values) { bestSim = sim; best = gi }
-                        }
-                        if (best < 0) {
-                            globalPrints += (p ?: FloatArray(0))
-                            best = globalPrints.size - 1
-                        }
-                        mapping[spk] = best
+                val prints = runCatching { diarizer.voiceprints(samples, local) }.getOrDefault(emptyMap())
+                for (spk in local.map { it.speaker }.distinct()) {
+                    val p = prints[spk]
+                    var best = -1; var bestSim = 0.5f
+                    if (p != null) globalPrints.forEachIndexed { gi, g ->
+                        val sim = cosine(p, g)
+                        if (sim > bestSim && gi !in mapping.values) { bestSim = sim; best = gi }
                     }
+                    if (best < 0) {
+                        globalPrints += (p ?: FloatArray(0))
+                        best = globalPrints.size - 1
+                    }
+                    mapping[spk] = best
                 }
                 val offsetMs = startSample * 1000L / SAMPLE_RATE
                 local.forEach { t -> turns += SpeakerTurn(t.startMs + offsetMs, t.endMs + offsetMs, mapping[t.speaker] ?: t.speaker) }
@@ -198,11 +227,15 @@ class Pipeline(
 
         // 3. Speech to text
         val words = ArrayList<Word>()
+        EngineGuard.begin(id, EngineGuard.TRANSCRIBE)
+        EngineGuard.log("whisper: ${runCatching { WhisperNative.systemInfo() }.getOrDefault("?")}; chunks=${chunks.size} threads=$threads beam=$beam")
         val t = Transcriber(models.file(ModelKind.TRANSCRIBE))
         transcriber = t
         val basePrompt = if (m0.language == "af")
             "Goeiemôre almal. Ons begin die vergadering. Die begroting is R15 000 en ons vergader weer op 15 Maart."
         else "Good morning everyone. Let's start the meeting. The budget is R15,000 and we meet again on 15 March."
+        val vocab = prefs.settings.value.vocabulary
+        val vocabPrompt = if (vocab.isEmpty()) "" else vocab.take(40).joinToString(", ") + ". "
         var tail = ""
         chunks.forEachIndexed { ci, regs ->
             if (cancelled) throw InterruptedException("Stopped")
@@ -226,7 +259,7 @@ class Pipeline(
                 }
             }.apply { isDaemon = true; start() }
             val punctuatedTail = tail.takeIf { tl -> tl.count { it in ".?!," } >= 2 && tl.any { it.isUpperCase() } } ?: ""
-            val prompt = (basePrompt + " " + punctuatedTail).take(600)
+            val prompt = (vocabPrompt + basePrompt + " " + punctuatedTail).take(800)
             val got = try {
                 t.transcribe(buf, m0.language, threads, beam, prompt)
             } finally {
@@ -244,9 +277,19 @@ class Pipeline(
 
         // 4. Attach each word to the voice speaking at that moment, then build readable paragraphs
         report(id, "Making it readable", 0.5f, 0.80f, 0.82f)
-        val utterances = buildUtterances(words, turns, m0.language, removeFillers)
+        val utterances = buildUtterances(words, turns, m0.language, removeFillers, vocab)
         val ids = utterances.map { it.speaker }.distinct().sorted()
-        val speakers = ids.map { sid -> m0.speakers.firstOrNull { it.id == sid } ?: Speaker(sid, "Person ${sid + 1}") }
+        val usedNames = HashSet<String>()
+        val speakers = ids.map { sid ->
+            val print = globalPrints.getOrNull(sid)?.toList() ?: emptyList()
+            val existing = m0.speakers.firstOrNull { it.id == sid }
+            if (existing != null && !com.bigoke.metings.data.isDefaultSpeakerName(existing.name)) return@map existing.copy(voiceprint = print)
+            val known = voices.match(print)?.takeIf { it.name !in usedNames }
+            if (known != null) {
+                usedNames += known.name
+                Speaker(sid, known.name, voiceprint = print, recognised = true)
+            } else Speaker(sid, com.bigoke.metings.data.defaultSpeakerName(sid, m0.language), voiceprint = print)
+        }
         val m = m0.copy(
             durationMs = durationMs,
             utterances = utterances,
@@ -302,16 +345,20 @@ class Pipeline(
         return best
     }
 
-    private fun buildUtterances(words: List<Word>, turns: List<SpeakerTurn>, lang: String, removeFillers: Boolean): List<Utterance> {
+    private fun buildUtterances(
+        words: List<Word>, turns: List<SpeakerTurn>, lang: String, removeFillers: Boolean, vocab: List<String>,
+    ): List<Utterance> {
         val out = ArrayList<Utterance>()
         var spk = -1
         var start = 0L; var end = 0L
         val sb = StringBuilder()
+        val unsure = ArrayList<String>()
         fun flush() {
             if (sb.isEmpty()) return
-            val text = TextCleaner.clean(sb.toString(), lang, removeFillers)
-            if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text)
+            val text = TextCleaner.clean(sb.toString(), lang, removeFillers, vocab)
+            if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text, unsure = unsure.distinct())
             sb.clear()
+            unsure.clear()
         }
         var sincePunct = 0
         for (w in words) {
@@ -330,6 +377,8 @@ class Pipeline(
             }
             if (sb.isNotEmpty()) sb.append(' ')
             sb.append(w.text)
+            val core = w.text.trim { !it.isLetterOrDigit() }
+            if (w.prob < 0.45f && core.length >= 3) unsure += core.lowercase()
             end = w.endMs
             if (w.text.last() in ".?!,;:…") sincePunct = 0 else sincePunct++
         }
@@ -339,7 +388,10 @@ class Pipeline(
         for (u in out) {
             val prev = merged.lastOrNull()
             if (prev != null && u.text.split(" ").size <= 1 && u.startMs - prev.endMs < 1500) {
-                merged[merged.size - 1] = prev.copy(text = TextCleaner.clean(prev.text.trimEnd('.') + " " + u.text, lang, false), endMs = u.endMs)
+                merged[merged.size - 1] = prev.copy(
+                    text = TextCleaner.clean(prev.text.trimEnd('.') + " " + u.text, lang, false, vocab),
+                    endMs = u.endMs, unsure = (prev.unsure + u.unsure).distinct(),
+                )
             } else merged += u
         }
         return merged

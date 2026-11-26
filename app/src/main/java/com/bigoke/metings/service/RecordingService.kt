@@ -22,6 +22,7 @@ import com.bigoke.metings.data.Meeting
 import com.bigoke.metings.data.MeetingStatus
 import com.bigoke.metings.engine.SAMPLE_RATE
 import com.bigoke.metings.engine.WavWriter
+import com.bigoke.metings.util.Ui
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
@@ -53,14 +54,17 @@ class RecordingService : Service() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_LANG = "lang"
         private const val EXTRA_SPEAKERS = "speakers"
+        private const val EXTRA_FOLDER = "folder"
+        private const val EXTRA_TEMPLATE = "template"
         private const val NOTIF_ID = 11
 
         private val _state = MutableStateFlow(RecorderState())
         val state: StateFlow<RecorderState> = _state
 
-        fun start(ctx: Context, title: String, language: String, expectedSpeakers: Int) {
+        fun start(ctx: Context, title: String, language: String, expectedSpeakers: Int, folder: String = "", template: String = "general") {
             ctx.startForegroundService(Intent(ctx, RecordingService::class.java).setAction(ACTION_START)
-                .putExtra(EXTRA_TITLE, title).putExtra(EXTRA_LANG, language).putExtra(EXTRA_SPEAKERS, expectedSpeakers))
+                .putExtra(EXTRA_TITLE, title).putExtra(EXTRA_LANG, language).putExtra(EXTRA_SPEAKERS, expectedSpeakers)
+                .putExtra(EXTRA_FOLDER, folder).putExtra(EXTRA_TEMPLATE, template))
         }
         fun pause(ctx: Context) = send(ctx, ACTION_PAUSE)
         fun resume(ctx: Context) = send(ctx, ACTION_RESUME)
@@ -87,6 +91,8 @@ class RecordingService : Service() {
                 intent.getStringExtra(EXTRA_TITLE) ?: "",
                 intent.getStringExtra(EXTRA_LANG) ?: "af",
                 intent.getIntExtra(EXTRA_SPEAKERS, 0),
+                intent.getStringExtra(EXTRA_FOLDER) ?: "",
+                intent.getStringExtra(EXTRA_TEMPLATE) ?: "general",
             )
             ACTION_PAUSE -> if (running && !paused) {
                 paused = true
@@ -120,13 +126,13 @@ class RecordingService : Service() {
         )
         return NotificationCompat.Builder(this, MetingsApp.CH_RECORD)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle(if (paused) "Recording paused" else "Recording meeting")
-            .setContentText("Tap to open Metings")
+            .setContentTitle(if (paused) Ui.t("Recording paused", "Opname onderbreek") else Ui.t("Recording meeting", "Neem vergadering op"))
+            .setContentText(Ui.t("Tap to open Notule", "Tik om Notule oop te maak"))
             .setContentIntent(open)
             .setOngoing(true)
             .setUsesChronometer(!paused)
             .setWhen(System.currentTimeMillis() - elapsed())
-            .addAction(0, "Stop", stop)
+            .addAction(0, Ui.t("Stop", "Stop"), stop)
             .build()
     }
 
@@ -135,7 +141,7 @@ class RecordingService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun startRecording(titleIn: String, language: String, expectedSpeakers: Int) {
+    private fun startRecording(titleIn: String, language: String, expectedSpeakers: Int, folder: String, template: String) {
         val app = application as MetingsApp
         val id = app.repo.newId()
         meetingId = id
@@ -144,7 +150,7 @@ class RecordingService : Service() {
             (if (language == "af") "Vergadering " else "Meeting ") + SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()).format(Date(now))
         }
         val wavFile = File(app.repo.folder(id), "audio.wav")
-        app.repo.save(Meeting(id = id, title = title, createdAt = now, language = language, status = MeetingStatus.RECORDING, expectedSpeakers = expectedSpeakers))
+        app.repo.save(Meeting(id = id, title = title, createdAt = now, language = language, status = MeetingStatus.RECORDING, expectedSpeakers = expectedSpeakers, folder = folder, template = template))
 
         accumulatedMs = 0; paused = false
         segmentStart = SystemClock.elapsedRealtime()

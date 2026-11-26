@@ -2,6 +2,13 @@ package com.bigoke.metings.data
 
 import kotlinx.serialization.Serializable
 
+private val defaultName = Regex("""^(Person|Persoon) \d+$""")
+
+/** "Person 1" / "Persoon 1": a speaker that has not been named yet. */
+fun isDefaultSpeakerName(name: String) = defaultName.matches(name.trim())
+
+fun defaultSpeakerName(id: Int, language: String) = (if (language == "af") "Persoon " else "Person ") + (id + 1)
+
 @Serializable
 enum class MeetingStatus { RECORDING, QUEUED, PROCESSING, READY, FAILED }
 
@@ -10,6 +17,10 @@ data class Speaker(
     val id: Int,
     val name: String,
     val colorIndex: Int = id,
+    /** Voiceprint (TitaNet embedding) used to recognise this voice in later meetings. */
+    val voiceprint: List<Float> = emptyList(),
+    /** True when the name came from a voice remembered in an earlier meeting. */
+    val recognised: Boolean = false,
 )
 
 @Serializable
@@ -19,6 +30,8 @@ data class Utterance(
     val endMs: Long,
     val text: String,
     val edited: Boolean = false,
+    /** Words the speech model was unsure about (shown underlined so they can be checked). */
+    val unsure: List<String> = emptyList(),
 )
 
 @Serializable
@@ -54,6 +67,9 @@ data class Summary(
     val actions: List<ActionItem> = emptyList(),
     val keyFigures: List<String> = emptyList(),
     val followUps: List<String> = emptyList(),
+    /** Template-specific section, e.g. "Resolutions" for a board meeting. */
+    val extraTitle: String = "",
+    val extra: List<String> = emptyList(),
     /** "gemma" when written by the on-device AI, "extractive" for the key-sentences fallback. */
     val engine: String = "",
     val language: String = "af",
@@ -77,7 +93,9 @@ data class Meeting(
     val expectedSpeakers: Int = 0,
     val error: String? = null,
     val processingSeconds: Long = 0,
+    val folder: String = "",
+    val template: String = "general",
 ) {
-    fun speakerName(id: Int): String = speakers.firstOrNull { it.id == id }?.name ?: "Person ${id + 1}"
-    fun speaker(id: Int): Speaker = speakers.firstOrNull { it.id == id } ?: Speaker(id, "Person ${id + 1}")
+    fun speakerName(id: Int): String = speakers.firstOrNull { it.id == id }?.name ?: defaultSpeakerName(id, language)
+    fun speaker(id: Int): Speaker = speakers.firstOrNull { it.id == id } ?: Speaker(id, defaultSpeakerName(id, language))
 }

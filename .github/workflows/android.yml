@@ -80,7 +80,7 @@ jobs:
         run: |
           VERSION="1.0.${GITHUB_RUN_NUMBER}"
           mkdir -p out
-          cp app/build/outputs/apk/release/app-release.apk "out/Metings-${VERSION}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "out/Notule-${VERSION}.apk"
           ls -lh out
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -96,7 +96,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Metings-${{ steps.apk.outputs.version }}
+          name: Notule-${{ steps.apk.outputs.version }}
           path: out/*.apk
 
       - name: Publish to Releases
@@ -105,5 +105,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="v${{ steps.apk.outputs.version }}"
-          gh release create "$TAG" out/*.apk --repo "$GITHUB_REPOSITORY" --title "Metings ${{ steps.apk.outputs.version }}" \
-            --notes "Install the APK on your phone. On first launch, open Models and tap Download all (one-time, about 3.5 GB). After that the app works fully offline." --latest
+          gh release create "$TAG" out/*.apk --repo "$GITHUB_REPOSITORY" --title "Notule ${{ steps.apk.outputs.version }}" \
+            --notes "Install the APK over the previous version. First time only: open Models, allow folder access (so models survive updates and reinstalls) and tap Download all (about 3.5 GB). After that Notule works fully offline." --latest

@@ -1,3 +1,5 @@
 <resources>
-    <string name="app_name">Metings</string>
+    <string name="app_name">Notule</string>
+    <string name="widget_record">Record meeting</string>
+    <string name="tile_label">Record meeting</string>
 </resources>

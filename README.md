@@ -1,6 +1,8 @@
-# Metings
+# Notule
 
-Offline Afrikaans + English meeting recorder for Android.
+<img src="docs/icon.png" width="96" align="right"/>
+
+Offline Afrikaans + English meeting recorder and minute-taker for Android.
 
 - **Records** meetings in the background (screen off is fine), with pause and bookmarks.
 - **Recognises voices** and labels them Person 1, Person 2… (rename them once, merge if needed).
@@ -10,15 +12,23 @@ Offline Afrikaans + English meeting recorder for Android.
   phone numbers, e-mail addresses, colours, shapes and tasks — highlighted and tappable
   (add to calendar, open in Maps, call / WhatsApp, save contact, copy, VAT calculation…).
 - **Summarises** the meeting on the phone with Gemma 4 E2B: overview, decisions, action items, key figures, follow-ups.
-- **Keeps the audio** with the meeting and exports PDF / Word / text, with the audio attached.
+- **Keeps the audio** with the meeting and exports branded PDF minutes (logo, attendees, action table, signature lines), Word or text, with the audio attached.
+- **Remembers voices**: name someone once and they're recognised in later meetings.
+- **Your words**: a vocabulary list for names and terms, used for recognition and spelling.
+- **Uncertain words** are underlined so you can check them against the audio.
+- **Meeting templates**: general, board/committee, client consultation, site inspection, staff meeting.
+- **Search** inside a meeting with matches on the audio timeline; **folders** per client or project; **import** audio from WhatsApp, voice recorders or calls.
+- **Tasks** across all meetings, and send each person their tasks in one tap.
+- **App lock** (fingerprint / PIN) and encrypted storage of transcripts, summaries and voices.
+- **Afrikaans or English interface**, following the phone or chosen in Settings.
 
 Everything runs on the phone. The only internet use is the one-time model download (~3.5 GB).
 
 ## Install
 
-1. Download the latest `Metings-x.y.z.apk` from [Releases](../../releases).
-2. Open the app → **Models** → **Download all** (Wi-Fi recommended).
-3. Tap **Record**.
+1. Download the latest `Notule-x.y.z.apk` from [Releases](../../releases) and install it (updates install over the old version).
+2. Open **Models** → **Allow folder access** (models are kept in `Download/Notule/models`, so they survive updates and reinstalls) → **Download all** (Wi-Fi recommended).
+3. Tap **Record**, or use the home-screen widget / quick-settings tile.
 
 ## How it works
 

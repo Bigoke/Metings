@@ -24,7 +24,23 @@ object TextCleaner {
 
     private val wordRegex = Regex("""[\p{L}'’]+""")
 
-    fun clean(raw: String, language: String, removeFillers: Boolean): String {
+    /** Spelling from the user's vocabulary list wins over a near-miss from speech recognition. */
+    private fun applyVocabulary(t: String, vocab: List<String>): String {
+        if (vocab.isEmpty()) return t
+        val words = vocab.flatMap { it.split(' ') }.filter { it.length >= 4 }.distinct()
+        if (words.isEmpty()) return t
+        val folded = words.associateBy { Fuzzy.fold(it) }
+        return wordRegex.replace(t) { m ->
+            val w = m.value
+            if (w.length < 4) return@replace w
+            val f = Fuzzy.fold(w)
+            if (f in folded) return@replace folded.getValue(f)
+            val best = Fuzzy.best(w, folded.keys, 0.93) ?: return@replace w
+            folded.getValue(best)
+        }
+    }
+
+    fun clean(raw: String, language: String, removeFillers: Boolean, vocab: List<String> = emptyList()): String {
         var t = raw.replace(Regex("""\s+"""), " ").trim()
         if (removeFillers) {
             t = t.split(" ").filter { w ->
@@ -39,6 +55,7 @@ object TextCleaner {
                 if (w.first().isUpperCase()) repl.replaceFirstChar { it.uppercase() } else repl
             }
         }
+        t = applyVocabulary(t, vocab)
         // Collapse immediate word repeats ("die die" -> "die"), keep deliberate "baie baie" style only once.
         t = Regex("""\b(\p{L}+)(\s+\1\b)+""", RegexOption.IGNORE_CASE).replace(t) { it.groupValues[1] }
         // Tidy punctuation spacing.
