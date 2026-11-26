@@ -207,8 +207,9 @@ class RecordingService : Service() {
         val total = elapsed()
         val marks = _state.value.bookmarks
         if (id != null) {
-            app.repo.update(id) { it.copy(status = MeetingStatus.QUEUED, durationMs = total, bookmarksMs = marks) }
-            ProcessingService.enqueue(this, id)
+            val auto = app.prefs.settings.value.autoTranscribe
+            app.repo.update(id) { it.copy(status = if (auto) MeetingStatus.QUEUED else MeetingStatus.NEW, durationMs = total, bookmarksMs = marks) }
+            if (auto) ProcessingService.enqueue(this, id)
         }
         wakeLock?.let { if (it.isHeld) it.release() }
         _state.value = RecorderState(active = false, meetingId = id)

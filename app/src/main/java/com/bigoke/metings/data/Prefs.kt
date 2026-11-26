@@ -18,6 +18,8 @@ data class Settings(
     val useGpuForSummary: Boolean = true,
     val consentReminder: Boolean = true,
     val keepWav: Boolean = false,
+    /** Start transcribing as soon as a recording stops or an import finishes. */
+    val autoTranscribe: Boolean = false,
     val appLock: Boolean = false,
     /** Names, companies and terms that should be recognised and spelt correctly. */
     val vocabulary: List<String> = emptyList(),
@@ -43,6 +45,7 @@ class Prefs(context: Context) {
         useGpuForSummary = sp.getBoolean("useGpuForSummary", true),
         consentReminder = sp.getBoolean("consentReminder", true),
         keepWav = sp.getBoolean("keepWav", false),
+        autoTranscribe = sp.getBoolean("autoTranscribe", false),
         appLock = sp.getBoolean("appLock", false),
         vocabulary = (sp.getString("vocabulary", "") ?: "").lines().map { it.trim() }.filter { it.isNotEmpty() },
         companyName = sp.getString("companyName", "") ?: "",
@@ -64,6 +67,7 @@ class Prefs(context: Context) {
             .putBoolean("useGpuForSummary", s.useGpuForSummary)
             .putBoolean("consentReminder", s.consentReminder)
             .putBoolean("keepWav", s.keepWav)
+            .putBoolean("autoTranscribe", s.autoTranscribe)
             .putBoolean("appLock", s.appLock)
             .putString("vocabulary", s.vocabulary.joinToString("\n"))
             .putString("companyName", s.companyName)

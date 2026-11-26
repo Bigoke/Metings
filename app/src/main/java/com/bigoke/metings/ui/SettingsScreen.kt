@@ -168,6 +168,10 @@ fun SettingsScreen(onBack: () -> Unit, onModels: () -> Unit) {
 
             HorizontalDivider(Modifier.padding(vertical = 18.dp))
             SectionTitle(tr("Transcript", "Transkripsie"), Modifier.padding(bottom = 4.dp))
+            ToggleRow(tr("Transcribe automatically", "Transkribeer outomaties"),
+                tr("Start transcribing as soon as a recording stops. When off, tap Transcribe on the meeting yourself.",
+                    "Begin transkribeer sodra 'n opname stop. As dit af is, tik self Transkribeer by die vergadering."),
+                s.autoTranscribe) { v -> prefs.update { it.copy(autoTranscribe = v) } }
             ToggleRow(tr("Remove filler words", "Verwyder stopwoorde"), tr("Drops “uhm”, “eh”, “er” so the text reads cleanly.", "Laat “uhm”, “eh”, “er” weg sodat die teks skoon lees."), s.removeFillers) { v -> prefs.update { it.copy(removeFillers = v) } }
             ToggleRow(tr("Mark uncertain words", "Merk onsekere woorde"), tr("Underlines words the speech model was unsure about, so you can check them.", "Onderstreep woorde waaroor die spraakmodel onseker was, sodat jy dit kan nagaan."), s.markUnsure) { v -> prefs.update { it.copy(markUnsure = v) } }
             ToggleRow(tr("Keep original WAV", "Hou oorspronklike WAV"), tr("Uses more space (≈115 MB per hour) but lets you process a meeting again later.", "Gebruik meer spasie (≈115 MB per uur) maar laat jou toe om 'n vergadering later weer te verwerk."), s.keepWav) { v -> prefs.update { it.copy(keepWav = v) } }

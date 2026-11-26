@@ -178,6 +178,11 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text(tr("Rename", "Hernoem")) }, onClick = { menu = false; renaming = true })
                         DropdownMenuItem(text = { Text(tr("Move to folder", "Skuif na vouer")) }, onClick = { menu = false; moving = true })
+                        if (m.status == MeetingStatus.NEW) DropdownMenuItem(text = { Text(tr("Transcribe", "Transkribeer")) }, onClick = {
+                            menu = false
+                            app.repo.update(id) { it.copy(status = MeetingStatus.QUEUED, error = null) }
+                            ProcessingService.enqueue(ctx, id)
+                        })
                         if (m.status == MeetingStatus.READY) {
                             DropdownMenuItem(text = { Text(tr("Share minutes (PDF) + audio", "Deel notule (PDF) + klank")) }, onClick = { menu = false; Exporter.share(ctx, m, true, true) })
                             DropdownMenuItem(text = { Text(tr("Share minutes (PDF) only", "Deel slegs notule (PDF)")) }, onClick = { menu = false; Exporter.share(ctx, m, true, false) })
@@ -186,7 +191,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                             DropdownMenuItem(text = { Text(tr("Share audio only", "Deel slegs klank")) }, onClick = { menu = false; Exporter.share(ctx, m, false, true) })
                             DropdownMenuItem(text = { Text(tr("Rewrite summary", "Herskryf opsomming")) }, onClick = { menu = false; ProcessingService.enqueue(ctx, id, summaryOnly = true) })
                         }
-                        if (app.repo.audio(m).name.endsWith(".wav") && m.status != MeetingStatus.PROCESSING) {
+                        if (app.repo.audio(m).name.endsWith(".wav") && m.status != MeetingStatus.PROCESSING && m.status != MeetingStatus.NEW) {
                             DropdownMenuItem(text = { Text(tr("Process again", "Verwerk weer")) }, onClick = {
                                 menu = false
                                 EngineGuard.clear(id)
@@ -232,6 +237,10 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                 }
             }
             when (m.status) {
+                MeetingStatus.NEW -> NotTranscribedCard(app.models.coreReady, onModels) {
+                    app.repo.update(id) { it.copy(status = MeetingStatus.QUEUED, error = null) }
+                    ProcessingService.enqueue(ctx, id)
+                }
                 MeetingStatus.QUEUED, MeetingStatus.PROCESSING, MeetingStatus.RECORDING ->
                     ProcessingCard(m, progressMap[id]?.stage, progressMap[id]?.overall, app.models.coreReady, onModels) {
                         ProcessingService.cancel(ctx)
@@ -318,7 +327,11 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
             onDismissRequest = { confirmDelete = false },
             title = { Text(tr("Delete meeting?", "Skrap vergadering?")) },
             text = { Text(tr("The recording, transcript and summary will be removed from this phone.", "Die opname, transkripsie en opsomming word van hierdie foon verwyder.")) },
-            confirmButton = { TextButton(onClick = { confirmDelete = false; player.release(); app.repo.delete(id); onBack() }) { Text(tr("Delete", "Skrap"), color = MaterialTheme.colorScheme.error) } },
+            confirmButton = { TextButton(onClick = {
+                confirmDelete = false
+                if (m.status == MeetingStatus.PROCESSING || m.status == MeetingStatus.QUEUED) ProcessingService.cancel(ctx)
+                player.release(); app.repo.delete(id); onBack()
+            }) { Text(tr("Delete", "Skrap"), color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(tr("Cancel", "Kanselleer")) } },
         )
     }
@@ -390,6 +403,23 @@ private fun ProcessingCard(m: Meeting, stage: String?, overall: Float?, coreRead
                     TextButton(onClick = onStop) { Text(tr("Stop", "Stop")) }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun NotTranscribedCard(coreReady: Boolean, onModels: () -> Unit, onTranscribe: () -> Unit) {
+    Card(Modifier.fillMaxWidth().padding(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Column(Modifier.padding(16.dp)) {
+            Text(tr("Not transcribed yet", "Nog nie getranskribeer nie"), style = MaterialTheme.typography.titleSmall)
+            Text(
+                tr("You can listen to the recording below. Tap Transcribe to make the transcript, details and summary — it all happens on this phone.",
+                    "Jy kan hieronder na die opname luister. Tik Transkribeer om die transkripsie, besonderhede en opsomming te maak — alles gebeur op hierdie foon."),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(10.dp))
+            if (coreReady) Button(onClick = onTranscribe) { Text(tr("Transcribe", "Transkribeer")) }
+            else Button(onClick = onModels) { Text(tr("Download models first", "Laai eers modelle af")) }
         }
     }
 }

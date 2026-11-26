@@ -65,9 +65,8 @@ class MetingsApp : Application() {
         }
         // A meeting left "processing" or "recording" by a crash / reboot is put back in the queue.
         repo.meetings.value.forEach { m ->
-            if (m.status == MeetingStatus.RECORDING || (m.status == MeetingStatus.PROCESSING && !engineAlive)) {
-                repo.update(m.id) { it.copy(status = MeetingStatus.QUEUED) }
-            }
+            if (m.status == MeetingStatus.RECORDING) repo.update(m.id) { it.copy(status = MeetingStatus.NEW) }
+            else if (m.status == MeetingStatus.PROCESSING && !engineAlive) repo.update(m.id) { it.copy(status = MeetingStatus.QUEUED) }
         }
         watchEngine()
     }

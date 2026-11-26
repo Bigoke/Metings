@@ -10,7 +10,8 @@ fun isDefaultSpeakerName(name: String) = defaultName.matches(name.trim())
 fun defaultSpeakerName(id: Int, language: String) = (if (language == "af") "Persoon " else "Person ") + (id + 1)
 
 @Serializable
-enum class MeetingStatus { RECORDING, QUEUED, PROCESSING, READY, FAILED }
+/** NEW = recorded or imported, not transcribed yet (transcribe on request). */
+enum class MeetingStatus { RECORDING, NEW, QUEUED, PROCESSING, READY, FAILED }
 
 @Serializable
 data class Speaker(

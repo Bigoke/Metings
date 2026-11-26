@@ -8,7 +8,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.SelectAll
+import androidx.compose.material.icons.outlined.Subtitles
+import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -88,6 +97,14 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
     val progress by app.pipeline.progress.collectAsStateWithLifecycle()
     val modelStatus by app.models.status.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
+
+    fun transcribe(ids: Collection<String>) {
+        ids.forEach { id -> app.repo.update(id) { it.copy(status = MeetingStatus.QUEUED, error = null) } }
+        ids.firstOrNull()?.let { ProcessingService.enqueue(ctx, it) }
+    }
     var folder by remember { mutableStateOf<String?>(null) }
     var importing by remember { mutableStateOf<Float?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
@@ -118,13 +135,14 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                     app.repo.save(
                         Meeting(
                             id = id, title = name, createdAt = System.currentTimeMillis(), durationMs = dur,
-                            language = s.language, status = MeetingStatus.QUEUED, folder = folder ?: "", template = s.lastTemplate,
+                            language = s.language, status = if (s.autoTranscribe) MeetingStatus.QUEUED else MeetingStatus.NEW,
+                            folder = folder ?: "", template = s.lastTemplate,
                         )
                     )
                 }.isSuccess
             }
             importing = null
-            if (ok) { ProcessingService.enqueue(ctx, id); onOpen(id) } else { app.repo.delete(id); importError = importFailed }
+            if (ok) { if (s.autoTranscribe) ProcessingService.enqueue(ctx, id); onOpen(id) } else { app.repo.delete(id); importError = importFailed }
         }
     }
 
@@ -141,7 +159,21 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            if (selected.isNotEmpty()) {
+                val canTranscribe = meetings.filter { it.id in selected }.any { it.status == MeetingStatus.NEW || it.status == MeetingStatus.FAILED }
+                TopAppBar(
+                    title = { Text(tr("${selected.size} selected", "${selected.size} gekies")) },
+                    navigationIcon = { IconButton(onClick = { selected = emptySet() }) { Icon(Icons.Outlined.Close, tr("Cancel", "Kanselleer")) } },
+                    actions = {
+                        if (canTranscribe && coreReady) IconButton(onClick = {
+                            transcribe(meetings.filter { it.id in selected && (it.status == MeetingStatus.NEW || it.status == MeetingStatus.FAILED) }.map { it.id })
+                            selected = emptySet()
+                        }) { Icon(Icons.Outlined.Subtitles, tr("Transcribe", "Transkribeer")) }
+                        IconButton(onClick = { selected = meetings.map { it.id }.toSet() }) { Icon(Icons.Outlined.SelectAll, tr("Select all", "Kies alles")) }
+                        IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Outlined.Delete, tr("Delete", "Skrap"), tint = MaterialTheme.colorScheme.error) }
+                    },
+                )
+            } else TopAppBar(
                 title = {
                     Column {
                         Text("Notule", style = MaterialTheme.typography.headlineSmall)
@@ -284,22 +316,64 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                     }
                 }
             }
-            items(filtered, key = { it.id }) { m -> MeetingCard(m, progress[m.id]) { onOpen(m.id) } }
+            item {
+                if (meetings.isNotEmpty() && selected.isEmpty()) Text(
+                    tr("Tip: press and hold a meeting to select, transcribe or delete.", "Wenk: druk en hou 'n vergadering om te kies, te transkribeer of te skrap."),
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            items(filtered, key = { it.id }) { m ->
+                MeetingCard(
+                    m, progress[m.id], isSelected = m.id in selected, coreReady = coreReady,
+                    onClick = { if (selected.isNotEmpty()) selected = if (m.id in selected) selected - m.id else selected + m.id else onOpen(m.id) },
+                    onLongClick = { selected = if (m.id in selected) selected - m.id else selected + m.id },
+                    onTranscribe = { transcribe(listOf(m.id)) },
+                )
+            }
         }
+    }
+
+    if (confirmDelete) {
+        val n = selected.size
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text(tr("Delete $n meeting(s)?", "Skrap $n vergadering(s)?")) },
+            text = { Text(tr("The recordings, transcripts and summaries will be removed from this phone. This can't be undone.",
+                "Die opnames, transkripsies en opsommings word van hierdie foon verwyder. Dit kan nie ontdoen word nie.")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    val busy = meetings.any { it.id in selected && (it.status == MeetingStatus.PROCESSING) }
+                    if (busy) ProcessingService.cancel(ctx)
+                    selected.forEach { app.repo.delete(it) }
+                    selected = emptySet()
+                }) { Text(tr("Delete", "Skrap"), color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(tr("Cancel", "Kanselleer")) } },
+        )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MeetingCard(m: Meeting, p: ProcessProgress?, onClick: () -> Unit) {
+private fun MeetingCard(
+    m: Meeting, p: ProcessProgress?, isSelected: Boolean, coreReady: Boolean,
+    onClick: () -> Unit, onLongClick: () -> Unit, onTranscribe: () -> Unit,
+) {
     Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isSelected) {
+                    Icon(Icons.Outlined.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                }
                 Text(m.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 if (m.folder.isNotBlank()) {
                     Spacer(Modifier.width(8.dp))
@@ -338,6 +412,13 @@ private fun MeetingCard(m: Meeting, p: ProcessProgress?, onClick: () -> Unit) {
                     Spacer(Modifier.height(6.dp))
                     if (p != null) LinearProgressIndicator(progress = { p.overall }, modifier = Modifier.fillMaxWidth())
                     else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                MeetingStatus.NEW -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Schedule, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(4.dp))
+                    Text(formatDuration(m.durationMs) + " · " + tr("not transcribed", "nie getranskribeer nie"),
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                    if (coreReady) TextButton(onClick = onTranscribe) { Text(tr("Transcribe", "Transkribeer")) }
                 }
                 MeetingStatus.RECORDING -> Text("● " + tr("Recording", "Neem op"), color = RecordRed, style = MaterialTheme.typography.labelLarge)
                 MeetingStatus.FAILED -> Row(verticalAlignment = Alignment.CenterVertically) {
