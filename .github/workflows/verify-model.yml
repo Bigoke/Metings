@@ -1,0 +1,24 @@
+name: Verify speech model
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/verify-model.yml"]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Build whisper-cli
+        run: |
+          git clone --depth 1 --branch v1.9.6 https://github.com/ggml-org/whisper.cpp
+          cmake -S whisper.cpp -B b -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON -DGGML_NATIVE=OFF
+          cmake --build b --target whisper-cli -j 4
+      - name: Download converted model
+        run: curl -fL -o model.bin https://github.com/${{ github.repository }}/releases/download/models-v1/ggml-fluister-turbo-q8_0.bin
+      - name: Transcribe sample (English)
+        run: |
+          CLI=$(find b -name whisper-cli -type f | head -1)
+          "$CLI" -m model.bin -f whisper.cpp/samples/jfk.wav -l en -t 4 -bs 5 -ml 0

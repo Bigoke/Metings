@@ -1,0 +1,256 @@
+package com.bigoke.metings.engine
+
+import android.content.Context
+import android.util.Log
+import com.bigoke.metings.data.ActionItem
+import com.bigoke.metings.data.Entity
+import com.bigoke.metings.data.EntityType
+import com.bigoke.metings.data.Meeting
+import com.bigoke.metings.data.Summary
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.SamplerConfig
+import java.io.File
+
+/** Writes the meeting summary with Gemma on the phone; falls back to picking key sentences. */
+class Summarizer(private val context: Context) {
+
+    companion object {
+        private const val TAG = "Summarizer"
+        private const val CHUNK_CHARS = 6000
+    }
+
+    fun summarize(
+        meeting: Meeting,
+        modelFile: File?,
+        language: String,
+        useGpu: Boolean,
+        onProgress: (Float) -> Unit,
+    ): Summary {
+        val transcript = meeting.utterances.joinToString("\n") { "${meeting.speakerName(it.speaker)}: ${it.text}" }
+        if (transcript.isBlank()) return Summary(overview = emptyText(language), engine = "extractive", language = language)
+        if (modelFile != null && modelFile.exists()) {
+            try {
+                return llmSummary(meeting, transcript, modelFile, language, useGpu, onProgress)
+            } catch (t: Throwable) {
+                Log.w(TAG, "AI summary failed, using key sentences", t)
+            }
+        }
+        return extractive(meeting, language)
+    }
+
+    private fun emptyText(lang: String) =
+        if (lang == "af") "Geen spraak is in hierdie opname gevind nie." else "No speech was found in this recording."
+
+    // ------------------------------------------------------------------ on-device AI
+
+    private fun openEngine(modelFile: File, useGpu: Boolean): Engine {
+        val backends = if (useGpu) listOf(Backend.GPU(), Backend.CPU()) else listOf(Backend.CPU())
+        var last: Throwable? = null
+        for (b in backends) {
+            try {
+                val engine = Engine(
+                    EngineConfig(
+                        modelPath = modelFile.absolutePath,
+                        backend = b,
+                        maxNumTokens = 8192,
+                        cacheDir = context.cacheDir.path,
+                    )
+                )
+                engine.initialize()
+                return engine
+            } catch (t: Throwable) {
+                last = t
+                Log.w(TAG, "Backend ${b.name} failed", t)
+            }
+        }
+        throw last ?: IllegalStateException("No backend")
+    }
+
+    private fun ask(engine: Engine, system: String, prompt: String): String {
+        val cfg = ConversationConfig(
+            systemInstruction = Contents.of(system),
+            samplerConfig = SamplerConfig(topK = 40, topP = 0.9, temperature = 0.3),
+        )
+        engine.createConversation(cfg).use { conv ->
+            return conv.sendMessage(prompt).toString().trim()
+        }
+    }
+
+    private fun langName(lang: String) = if (lang == "af") "Afrikaans" else "English"
+
+    private fun llmSummary(
+        meeting: Meeting, transcript: String, modelFile: File, language: String, useGpu: Boolean,
+        onProgress: (Float) -> Unit,
+    ): Summary {
+        val lang = langName(language)
+        val system = "You are a professional meeting secretary in South Africa. You write clear, factual, " +
+            "well-structured meeting minutes in $lang. Never invent facts that are not in the transcript. " +
+            "Keep speaker names exactly as given."
+        val engine = openEngine(modelFile, useGpu)
+        try {
+            onProgress(0.05f)
+            val chunks = chunk(transcript)
+            val notes = if (chunks.size == 1) transcript else {
+                chunks.mapIndexed { i, c ->
+                    val r = ask(
+                        engine, system,
+                        "This is part ${i + 1} of ${chunks.size} of a meeting transcript (Afrikaans and/or English).\n" +
+                            "Write compact notes in $lang: key points, decisions, tasks with who must do them and by when, " +
+                            "and every important number, amount, date, name and place mentioned.\n\nTRANSCRIPT PART:\n$c"
+                    )
+                    onProgress(0.1f + 0.6f * (i + 1) / chunks.size)
+                    r
+                }.joinToString("\n\n")
+            }
+            val known = keyFiguresFromEntities(meeting).take(12).joinToString("\n") { "- $it" }
+            val final = ask(
+                engine, system,
+                "Write the minutes of this meeting in $lang using EXACTLY this layout with these English headings:\n\n" +
+                    "OVERVIEW:\n<3 to 5 sentences describing the purpose and outcome of the meeting>\n" +
+                    "DECISIONS:\n- <decision>\n" +
+                    "ACTIONS:\n- <task> | <person responsible or blank> | <due date or blank>\n" +
+                    "KEY FIGURES:\n- <important amount, number or date and what it is for>\n" +
+                    "FOLLOW-UPS:\n- <open question or item for the next meeting>\n\n" +
+                    "Write 'None' under a heading if there is nothing for it. No other text.\n\n" +
+                    (if (known.isNotEmpty()) "Details found in the transcript:\n$known\n\n" else "") +
+                    (if (chunks.size == 1) "TRANSCRIPT:\n$notes" else "NOTES FROM THE MEETING:\n$notes")
+            )
+            onProgress(0.95f)
+            val parsed = parse(final, language)
+            if (parsed.overview.isBlank() && parsed.decisions.isEmpty() && parsed.actions.isEmpty()) {
+                return extractive(meeting, language).copy(overview = final.take(1500), engine = "gemma")
+            }
+            return parsed
+        } finally {
+            runCatching { engine.close() }
+        }
+    }
+
+    private fun chunk(t: String): List<String> {
+        if (t.length <= CHUNK_CHARS) return listOf(t)
+        val out = ArrayList<String>()
+        val sb = StringBuilder()
+        for (line in t.lines()) {
+            if (sb.length + line.length > CHUNK_CHARS && sb.isNotEmpty()) { out += sb.toString(); sb.clear() }
+            if (line.length > CHUNK_CHARS) line.chunked(CHUNK_CHARS).forEach { out += it } else sb.appendLine(line)
+        }
+        if (sb.isNotBlank()) out += sb.toString()
+        return out
+    }
+
+    private fun parse(text: String, language: String): Summary {
+        val sections = HashMap<String, MutableList<String>>()
+        var current = ""
+        val headings = mapOf(
+            "OVERVIEW" to "OVERVIEW", "DECISIONS" to "DECISIONS", "ACTIONS" to "ACTIONS",
+            "KEY FIGURES" to "KEY FIGURES", "FOLLOW-UPS" to "FOLLOW-UPS", "FOLLOW UPS" to "FOLLOW-UPS",
+        )
+        for (raw in text.lines()) {
+            val line = raw.trim().trim('*', '#').trim()
+            if (line.isEmpty()) continue
+            val h = headings.entries.firstOrNull { line.uppercase().startsWith(it.key) }
+            if (h != null) {
+                current = h.value
+                val rest = line.substring(h.key.length).trimStart(':', ' ').trim()
+                if (rest.isNotEmpty()) sections.getOrPut(current) { mutableListOf() }.add(rest)
+                continue
+            }
+            if (current.isNotEmpty()) sections.getOrPut(current) { mutableListOf() }.add(line)
+        }
+        fun items(key: String) = sections[key].orEmpty()
+            .map { it.removePrefix("-").removePrefix("•").removePrefix("*").trim() }
+            .filter { it.isNotBlank() && it.lowercase() !in setOf("none", "geen", "n/a", "nvt") }
+        val actions = items("ACTIONS").map { a ->
+            val parts = a.split('|').map { it.trim() }
+            ActionItem(
+                text = parts.getOrElse(0) { a },
+                owner = parts.getOrElse(1) { "" }.takeUnless { it.lowercase() in setOf("blank", "none", "-", "geen") } ?: "",
+                due = parts.getOrElse(2) { "" }.takeUnless { it.lowercase() in setOf("blank", "none", "-", "geen") } ?: "",
+            )
+        }
+        return Summary(
+            overview = items("OVERVIEW").joinToString(" "),
+            decisions = items("DECISIONS"),
+            actions = actions,
+            keyFigures = items("KEY FIGURES"),
+            followUps = items("FOLLOW-UPS"),
+            engine = "gemma",
+            language = language,
+        )
+    }
+
+    // ------------------------------------------------------------------ key sentences fallback
+
+    private val stop = setOf(
+        "die", "en", "van", "is", "in", "dit", "het", "wat", "ek", "jy", "ons", "hulle", "nie", "op", "vir", "met",
+        "te", "om", "sal", "kan", "moet", "was", "dat", "sy", "hy", "maar", "ook", "so", "as", "na", "by", "aan",
+        "the", "and", "of", "to", "a", "an", "in", "is", "it", "that", "for", "on", "with", "we", "you", "i", "be",
+        "this", "are", "was", "have", "will", "so", "but", "they", "at", "not", "just", "like", "yes", "ja", "nee",
+        "okay", "ok", "net", "nou", "baie", "goed", "dan", "daar", "hier", "'n", "n", "my", "jou", "our", "your",
+    )
+    private val decisionWords = listOf(
+        "besluit", "ooreengekom", "goedgekeur", "aanvaar", "finaal", "afgehandel", "decided", "agreed", "approved",
+        "resolved", "confirmed", "bevestig", "final",
+    )
+
+    fun extractive(meeting: Meeting, language: String): Summary {
+        data class Sent(val text: String, val speaker: Int, val order: Int)
+        val sents = ArrayList<Sent>()
+        meeting.utterances.forEach { u ->
+            Regex("""[^.!?…]+[.!?…]?""").findAll(u.text).map { it.value.trim() }.filter { it.split(" ").size >= 5 }
+                .forEach { sents += Sent(it, u.speaker, sents.size) }
+        }
+        if (sents.isEmpty()) return Summary(overview = emptyText(language), engine = "extractive", language = language)
+        val freq = HashMap<String, Int>()
+        sents.forEach { s -> words(s.text).forEach { freq[it] = (freq[it] ?: 0) + 1 } }
+        val maxF = (freq.values.maxOrNull() ?: 1).toDouble()
+        fun score(s: Sent): Double {
+            val ws = words(s.text)
+            if (ws.isEmpty()) return 0.0
+            var sc = ws.sumOf { (freq[it] ?: 0) / maxF } / Math.sqrt(ws.size.toDouble())
+            if (Regex("""\d""").containsMatchIn(s.text)) sc *= 1.2
+            if (decisionWords.any { s.text.lowercase().contains(it) }) sc *= 1.5
+            return sc
+        }
+        val n = (sents.size / 12).coerceIn(3, 7)
+        val top = sents.sortedByDescending { score(it) }.take(n).sortedBy { it.order }
+        val overview = top.joinToString(" ") { "${meeting.speakerName(it.speaker)}: ${it.text}" }
+        val decisions = sents.filter { s -> decisionWords.any { s.text.lowercase().contains(it) } }.take(8).map { it.text }
+        val actions = meeting.entities.filter { it.type == EntityType.TASK }.take(15).map { e ->
+            val (owner, due) = e.value.split('|').let { it.getOrElse(0) { "" } to it.getOrElse(1) { "" } }
+            ActionItem(e.text, owner, due)
+        }
+        val follow = sents.filter { it.text.endsWith("?") }.takeLast(5).map { "${meeting.speakerName(it.speaker)}: ${it.text}" }
+        return Summary(
+            overview = overview,
+            decisions = decisions,
+            actions = actions,
+            keyFigures = keyFiguresFromEntities(meeting),
+            followUps = follow,
+            engine = "extractive",
+            language = language,
+        )
+    }
+
+    private fun words(t: String) = Regex("""[\p{L}\d']+""").findAll(t.lowercase()).map { it.value }
+        .filter { it.length > 2 && it !in stop }.toList()
+
+    private fun keyFiguresFromEntities(meeting: Meeting): List<String> {
+        val wanted = setOf(EntityType.AMOUNT, EntityType.PERCENT, EntityType.DATE, EntityType.MEASUREMENT)
+        return meeting.entities.filter { it.type in wanted }
+            .distinctBy { it.type to it.value }
+            .take(20)
+            .map { e -> "${e.text} — ${contextOf(meeting, e)}" }
+    }
+
+    private fun contextOf(meeting: Meeting, e: Entity): String {
+        val t = meeting.utterances.getOrNull(e.utterance)?.text ?: return ""
+        val s = t.lastIndexOfAny(charArrayOf('.', '!', '?'), (e.start - 1).coerceAtLeast(0)).let { if (it < 0) 0 else it + 1 }
+        val end = t.indexOfAny(charArrayOf('.', '!', '?'), e.end).let { if (it < 0) t.length else it + 1 }
+        return t.substring(s, end).trim().take(160)
+    }
+}
