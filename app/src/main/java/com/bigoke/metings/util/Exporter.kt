@@ -276,20 +276,36 @@ object Exporter {
             val audio = MetingsApp.instance.repo.audio(m)
             if (audio.exists()) {
                 val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
-                val copy = File(dir, safeName(m) + "." + audio.extension)
+                val copy = File(dir, safeName(m) + " (" + Ui.t("audio", "klank") + ")." + audio.extension)
                 audio.copyTo(copy, overwrite = true)
                 uris += uri(ctx, copy)
             }
         }
         if (uris.isEmpty()) return
+        startShare(ctx, uris, m.title, m.summary?.overview ?: m.title)
+    }
+
+    /**
+     * Shares one or more files. Every file is put in the ClipData of both the share intent and the
+     * chooser, so the receiving app is allowed to read all of them (not only the first).
+     */
+    private fun startShare(ctx: Context, uris: List<Uri>, subject: String, text: String) {
+        val types = uris.map { ctx.contentResolver.getType(it) ?: "application/octet-stream" }
         val intent = if (uris.size == 1) {
-            Intent(Intent.ACTION_SEND).setType(if (includePdf) "application/pdf" else "audio/*").putExtra(Intent.EXTRA_STREAM, uris[0])
+            Intent(Intent.ACTION_SEND).setType(types[0]).putExtra(Intent.EXTRA_STREAM, uris[0])
         } else {
-            Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*").putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            val common = types.map { it.substringBefore('/') }.distinct().singleOrNull()?.let { "$it/*" } ?: "*/*"
+            Intent(Intent.ACTION_SEND_MULTIPLE).setType(common).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
         }
-        intent.putExtra(Intent.EXTRA_SUBJECT, m.title).putExtra(Intent.EXTRA_TEXT, m.summary?.overview ?: m.title)
+        val clip = android.content.ClipData.newUri(ctx.contentResolver, subject, uris[0])
+        uris.drop(1).forEach { clip.addItem(android.content.ClipData.Item(it)) }
+        intent.clipData = clip
+        intent.putExtra(Intent.EXTRA_SUBJECT, subject).putExtra(Intent.EXTRA_TEXT, text)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        ctx.startActivity(Intent.createChooser(intent, m.title).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        val chooser = Intent.createChooser(intent, subject)
+        chooser.clipData = clip
+        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        ctx.startActivity(chooser)
     }
 
     fun shareText(ctx: Context, m: Meeting) {
