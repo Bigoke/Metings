@@ -1,0 +1,86 @@
+name: Verify AI models
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/verify-ai.yml"]
+
+jobs:
+  diarization:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install sherpa-onnx soundfile numpy
+      - name: Download models + sample
+        run: |
+          R=https://github.com/${{ github.repository }}/releases/download/models-v1
+          curl -fsSL -o seg.onnx $R/pyannote-segmentation-3-0.onnx
+          curl -fsSL -o emb.onnx $R/nemo_en_titanet_large.onnx
+          curl -fsSL -o two.wav https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/1-two-speakers-en.wav
+      - name: Who spoke when
+        run: |
+          python - <<'EOF'
+          import sherpa_onnx, soundfile as sf
+          cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+              segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                  pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model="seg.onnx"), num_threads=2),
+              embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model="emb.onnx", num_threads=2),
+              clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=0.5),
+              min_duration_on=0.3, min_duration_off=0.5)
+          sd = sherpa_onnx.OfflineSpeakerDiarization(cfg)
+          audio, sr = sf.read("two.wav", dtype="float32")
+          print("sample rate", sr, "expected", sd.sample_rate)
+          res = sd.process(audio).sort_by_start_time()
+          spk = set()
+          for r in res:
+              spk.add(r.speaker); print(f"{r.start:7.2f} -- {r.end:7.2f}  speaker_{r.speaker}")
+          print("speakers found:", len(spk), "(expected 2)")
+          EOF
+
+  gemma:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install litert-lm huggingface_hub
+      - name: Download Gemma (same URL the app uses)
+        run: |
+          curl -fL -o gemma.litertlm https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm
+          ls -lh gemma.litertlm
+      - name: Punctuation prompt (Afrikaans)
+        run: |
+          litert-lm run gemma.litertlm --prompt="You restore punctuation and capitalisation in Afrikaans (and English) speech transcripts. You never change, add, remove, translate or reorder words.
+
+          Add correct punctuation (full stops, commas, question marks) and capital letters (sentence starts, names of people, places, companies, months and days) to each numbered line. Keep every word exactly as written and in the same order. Answer with the same numbered lines only.
+
+          1| goeie more almal die begroting vir die nuwe kantoor in pretoria is 200 duisend rand jan sal die verslag teen volgende vrydag stuur
+          2| ek dink ons moet die mure blou verf wat sê julle marietjie kan jy die verfwinkel in stellenbosch bel" 2>&1 | tail -20
+      - name: Summary prompt (Afrikaans)
+        run: |
+          litert-lm run gemma.litertlm --prompt="You are a professional meeting secretary in South Africa. You write clear, factual, well-structured meeting minutes in Afrikaans. Never invent facts that are not in the transcript. Keep speaker names exactly as given.
+
+          Write the minutes of this meeting in Afrikaans using EXACTLY this layout with these English headings:
+
+          OVERVIEW:
+          <3 to 5 sentences describing the purpose and outcome of the meeting>
+          DECISIONS:
+          - <decision>
+          ACTIONS:
+          - <task> | <person responsible or blank> | <due date or blank>
+          KEY FIGURES:
+          - <important amount, number or date and what it is for>
+          FOLLOW-UPS:
+          - <open question or item for the next meeting>
+
+          Write 'None' under a heading if there is nothing for it. No other text.
+
+          TRANSCRIPT:
+          Person 1: Goeiemôre almal. Die begroting vir die nuwe kantoor in Pretoria is R200 000.
+          Person 2: Dis meer as wat ons verlede jaar gehad het. Kan ons die meubels by die bestaande verskaffer koop?
+          Person 1: Ja, ons het besluit om by Jacobs Meubels te koop. Jan sal die bestelling teen volgende Vrydag plaas.
+          Person 3: Ek sal die verfwinkel in Stellenbosch bel oor die blou verf vir die mure. Die kwotasie was R12 500.
+          Person 2: Wanneer trek ons in? Ons moet dit volgende keer bespreek." 2>&1 | tail -40
