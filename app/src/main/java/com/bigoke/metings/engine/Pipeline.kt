@@ -53,12 +53,26 @@ class Pipeline(
         transcriber?.abort()
     }
 
+    @Volatile private var lastWrite = 0L
+
     private fun report(id: String, stage: String, fraction: Float, from: Float, to: Float) {
-        _progress.value = _progress.value + (id to ProcessProgress(stage, fraction, from + (to - from) * fraction))
+        val overall = from + (to - from) * fraction
+        _progress.value = _progress.value + (id to ProcessProgress(stage, fraction, overall))
+        val now = System.currentTimeMillis()
+        if (now - lastWrite > 400 || fraction == 0f) {
+            lastWrite = now
+            EngineGuard.writeProgress(id, stage, fraction, overall)
+        }
     }
 
     private fun clear(id: String) {
         _progress.value = _progress.value - id
+        EngineGuard.clearProgress()
+    }
+
+    /** In the app process: show progress reported by the separate engine process. */
+    fun showExternal(p: EngineGuard.Progress?) {
+        _progress.value = if (p == null) emptyMap() else mapOf(p.id to ProcessProgress(p.stage, p.fraction, p.overall))
     }
 
     private data class Region(val start: Int, val end: Int)
@@ -75,8 +89,8 @@ class Pipeline(
         if (crashes >= EngineGuard.MAX_CRASHES) {
             repo.update(id) {
                 it.copy(status = MeetingStatus.FAILED, error = Ui.t(
-                    "Notule closed unexpectedly while ${EngineGuard.stageLabel(crashedIn)}. Tap Retry, or send a diagnostic report from Settings.",
-                    "Notule het onverwags gesluit terwyl dit ${EngineGuard.stageLabel(crashedIn)}. Tik Probeer weer, of stuur 'n diagnoseverslag uit Instellings.",
+                    "Processing kept stopping while ${EngineGuard.stageLabel(crashedIn)}. Allow Notule to run in the background (battery settings), then tap Retry. If it still stops, send a diagnostic report from Settings.",
+                    "Verwerking het aanhoudend gestop terwyl dit ${EngineGuard.stageLabel(crashedIn)}. Laat Notule in die agtergrond loop (battery-instellings) en tik dan Probeer weer. As dit steeds stop, stuur 'n diagnoseverslag uit Instellings.",
                 ))
             }
             return

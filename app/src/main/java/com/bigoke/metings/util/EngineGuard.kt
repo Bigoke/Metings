@@ -24,11 +24,55 @@ object EngineGuard {
     const val PUNCTUATE = "punctuate"
     const val SUMMARY = "summary"
     const val AUDIO = "audio"
-    const val MAX_CRASHES = 3
+    const val MAX_CRASHES = 4
 
     private lateinit var appContext: Context
-    private val sp by lazy { appContext.getSharedPreferences("engine_guard", Context.MODE_PRIVATE) }
+    /** Shared between the app and the separate engine process, so it is a plain file read fresh each time. */
+    private val stateFile by lazy { File(appContext.filesDir, "engine_state.properties") }
+    private val progressFile by lazy { File(appContext.filesDir, "engine_progress.properties") }
+
+    @Synchronized
+    private fun load(f: File = stateFile): java.util.Properties = java.util.Properties().apply {
+        runCatching { if (f.exists()) f.inputStream().use { load(it) } }
+    }
+
+    @Synchronized
+    private fun edit(f: File = stateFile, change: (java.util.Properties) -> Unit) {
+        val p = load(f)
+        change(p)
+        val tmp = File(f.path + ".tmp")
+        tmp.outputStream().use { p.store(it, null) }
+        tmp.renameTo(f)
+    }
+
+    fun current(): String? = load().getProperty("current")
+
+    /** Written by the engine process; read by the app to show progress. */
+    fun writeProgress(id: String, stage: String, fraction: Float, overall: Float) = runCatching {
+        edit(progressFile) { p ->
+            p.clear()
+            p.setProperty("id", id); p.setProperty("stage", stage)
+            p.setProperty("fraction", fraction.toString()); p.setProperty("overall", overall.toString())
+            p.setProperty("time", System.currentTimeMillis().toString())
+        }
+    }
+
+    fun clearProgress() = runCatching { progressFile.delete() }
+
+    data class Progress(val id: String, val stage: String, val fraction: Float, val overall: Float, val time: Long)
+
+    fun readProgress(): Progress? = runCatching {
+        val p = load(progressFile)
+        val id = p.getProperty("id") ?: return null
+        Progress(id, p.getProperty("stage", ""), p.getProperty("fraction", "0").toFloat(), p.getProperty("overall", "0").toFloat(), p.getProperty("time", "0").toLong())
+    }.getOrNull()
     private val logFile by lazy { File(appContext.filesDir, "diagnostics.log") }
+
+    /** True when the separate processing process (":engine") is alive. */
+    fun engineRunning(): Boolean = runCatching {
+        appContext.getSystemService(ActivityManager::class.java).runningAppProcesses
+            ?.any { it.processName.endsWith(":engine") } == true
+    }.getOrDefault(false)
 
     fun install(context: Context) {
         appContext = context.applicationContext
@@ -37,7 +81,7 @@ object EngineGuard {
             runCatching {
                 val sw = StringWriter()
                 e.printStackTrace(PrintWriter(sw))
-                log("CRASH in thread ${thread.name} during ${sp.getString("current", "-")}\n$sw")
+                log("CRASH in thread ${thread.name} during ${current() ?: "-"}\n$sw")
             }
             previous?.uncaughtException(thread, e)
         }
@@ -49,27 +93,28 @@ object EngineGuard {
     }
 
     fun begin(id: String, stage: String) {
-        sp.edit().putString("current", "$id|$stage").commit()
+        edit { it.setProperty("current", "$id|$stage") }
         log("start $stage for $id")
     }
 
     fun end() {
-        sp.edit().remove("current").commit()
+        edit { it.remove("current") }
     }
 
-    fun crashes(id: String): Int = sp.getInt("crashes.$id", 0)
-    fun lastStage(id: String): String = sp.getString("stage.$id", "") ?: ""
+    fun crashes(id: String): Int = load().getProperty("crashes.$id", "0").toIntOrNull() ?: 0
+    fun lastStage(id: String): String = load().getProperty("stage.$id", "")
 
     fun clear(id: String) {
-        sp.edit().remove("crashes.$id").remove("stage.$id").apply()
+        edit { it.remove("crashes.$id"); it.remove("stage.$id") }
     }
 
     /** Call at app start: if a step was running when the app last closed, count it as a crash. Returns the meeting id. */
     fun recoverAfterCrash(): String? {
-        val cur = sp.getString("current", null) ?: return null
+        val cur = current() ?: return null
         val (id, stage) = cur.split('|').let { it[0] to it.getOrElse(1) { "" } }
         val n = crashes(id) + 1
-        sp.edit().putInt("crashes.$id", n).putString("stage.$id", stage).remove("current").commit()
+        edit { it.setProperty("crashes.$id", n.toString()); it.setProperty("stage.$id", stage); it.remove("current") }
+        clearProgress()
         log("app closed unexpectedly during $stage for $id (crash $n)")
         recordExitReasons()
         return id

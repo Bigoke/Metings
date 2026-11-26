@@ -68,6 +68,7 @@ class ProcessingService : Service() {
             return START_NOT_STICKY
         }
         val id = intent?.getStringExtra(EXTRA_ID)
+        app.repo.reload()
         if (id != null && queue.none { it.id == id }) queue.add(Job2(id, intent.getBooleanExtra(EXTRA_SUMMARY_ONLY, false)))
         // Also pick up anything else waiting (e.g. after a reboot).
         app.repo.meetings.value.filter { it.status == MeetingStatus.QUEUED && queue.none { q -> q.id == it.id } }
@@ -89,6 +90,7 @@ class ProcessingService : Service() {
         worker = scope.launch(Dispatchers.IO) {
             while (true) {
                 val job = queue.poll() ?: break
+                app.repo.reload()  // the app process may have changed meetings since this process started
                 val m = app.repo.get(job.id) ?: continue
                 currentTitle = m.title
                 app.pipeline.process(job.id, job.summaryOnly)
@@ -99,6 +101,8 @@ class ProcessingService : Service() {
             wakeLock?.let { if (it.isHeld) it.release() }
             ServiceCompat.stopForeground(this@ProcessingService, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
+            // End the engine process so the next job starts with fresh settings and free memory.
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 800)
         }
     }
 

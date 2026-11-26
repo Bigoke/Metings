@@ -1,6 +1,11 @@
 package com.bigoke.metings.ui
 
+import android.content.Intent
 import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -91,6 +96,9 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
     val openTasks = remember(meetings) { meetings.sumOf { m -> m.summary?.actions?.count { !it.done } ?: 0 } }
     val importFailed = tr("Could not read this audio file.", "Kon nie hierdie klanklêer lees nie.")
     val importedTitle = tr("Imported", "Ingevoer")
+    val pm = ctx.getSystemService(PowerManager::class.java)
+    var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -196,6 +204,28 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                                 )
                             }
                             TextButton(onClick = onModels) { Text(tr("Set up", "Stel op")) }
+                        }
+                    }
+                }
+            }
+            if (!batteryOk && meetings.any { it.status == MeetingStatus.QUEUED || it.status == MeetingStatus.PROCESSING || it.status == MeetingStatus.READY }) {
+                item {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(Modifier.padding(16.dp)) {
+                            Text(tr("Let Notule work in the background", "Laat Notule in die agtergrond werk"), style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                tr("Your phone's battery saver can stop Notule while it processes a meeting. Allow it to run in the background so transcripts always finish.",
+                                    "Jou foon se batterybespaarder kan Notule stop terwyl dit 'n vergadering verwerk. Laat dit in die agtergrond loop sodat transkripsies altyd klaarmaak."),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                            TextButton(onClick = {
+                                runCatching {
+                                    ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName)))
+                                }
+                            }) { Text(tr("Allow", "Laat toe")) }
                         }
                     }
                 }
