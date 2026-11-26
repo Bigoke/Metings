@@ -1,0 +1,95 @@
+name: Prepare offline models
+
+# Converts the Afrikaans-tuned Whisper model (Fluister turbo) to whisper.cpp
+# format, quantises it, and publishes it together with the speaker-detection
+# models as the "models-v1" release. The app downloads these files once.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/models.yml"]
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: models-v1
+  WHISPER_CPP_TAG: v1.9.6
+  HF_MODEL: digiphyte/fluister-turbo-transformers
+
+jobs:
+  models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android || true
+          df -h /
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python packages
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install "transformers>=4.45" numpy safetensors "huggingface_hub[cli]"
+
+      - name: Fetch whisper.cpp and openai/whisper assets
+        run: |
+          git clone --depth 1 --branch "$WHISPER_CPP_TAG" https://github.com/ggml-org/whisper.cpp whisper.cpp
+          git clone --depth 1 https://github.com/openai/whisper openai-whisper
+
+      - name: Download Fluister turbo
+        run: |
+          python - <<'EOF'
+          from huggingface_hub import snapshot_download
+          snapshot_download(repo_id="${{ env.HF_MODEL }}", local_dir="fluister")
+          EOF
+          ls -lh fluister
+
+      - name: Convert to ggml (f16)
+        run: |
+          mkdir -p out
+          python whisper.cpp/models/convert-h5-to-ggml.py fluister openai-whisper out
+          ls -lh out
+
+      - name: Build quantize tool
+        run: |
+          cmake -S whisper.cpp -B wbuild -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF
+          cmake --build wbuild --target whisper-quantize -j 4
+          find wbuild -name "whisper-quantize" -type f
+
+      - name: Quantise to q8_0
+        run: |
+          Q=$(find wbuild -name "whisper-quantize" -type f | head -1)
+          "$Q" out/ggml-model.bin ggml-fluister-turbo-q8_0.bin q8_0
+          rm -f out/ggml-model.bin
+          ls -lh ggml-fluister-turbo-q8_0.bin
+
+      - name: Speaker detection models
+        run: |
+          curl -fL -o seg.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2
+          tar xjf seg.tar.bz2
+          cp sherpa-onnx-pyannote-segmentation-3-0/model.onnx pyannote-segmentation-3-0.onnx
+          curl -fL -o nemo_en_titanet_large.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/nemo_en_titanet_large.onnx
+          ls -lh *.onnx
+
+      - name: Licences
+        run: |
+          {
+            echo "Fluister turbo (Afrikaans Whisper) - MIT, by DigiPhyte (Pty) Ltd. Base: OpenAI Whisper (Apache-2.0). Training data: andreoosthuizen/afrikaans-30s (CC-BY-4.0)."
+            echo "pyannote segmentation 3.0 - MIT. NeMo TitaNet large - CC-BY-4.0 (NVIDIA). Converted by k2-fsa/sherpa-onnx (Apache-2.0)."
+          } > MODEL-NOTICE.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "Offline models v1" \
+              --notes "Model files downloaded by the Metings app on first launch. Do not delete."
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            ggml-fluister-turbo-q8_0.bin pyannote-segmentation-3-0.onnx nemo_en_titanet_large.onnx MODEL-NOTICE.txt
