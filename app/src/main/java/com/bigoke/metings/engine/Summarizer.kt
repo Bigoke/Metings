@@ -239,8 +239,8 @@ class Summarizer(
             val parts = a.split('|').map { it.trim() }
             ActionItem(
                 text = parts.getOrElse(0) { a },
-                owner = parts.getOrElse(1) { "" }.takeUnless { it.lowercase() in setOf("blank", "none", "-", "geen") } ?: "",
-                due = parts.getOrElse(2) { "" }.takeUnless { it.lowercase() in setOf("blank", "none", "-", "geen") } ?: "",
+                owner = parts.getOrElse(1) { "" }.takeUnless { it.lowercase() in setOf("blank", "none", "-", "geen", "n/a", "nvt", "n.v.t.", "onbekend", "unknown") } ?: "",
+                due = parts.getOrElse(2) { "" }.takeUnless { it.lowercase() in setOf("blank", "none", "-", "geen", "n/a", "nvt", "n.v.t.", "onbekend", "unknown") } ?: "",
             )
         }
         return Summary(
