@@ -13,12 +13,20 @@ jobs:
     steps:
       - name: Build whisper-cli
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng ffmpeg >/dev/null
           git clone --depth 1 --branch v1.9.6 https://github.com/ggml-org/whisper.cpp
           cmake -S whisper.cpp -B b -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_EXAMPLES=ON -DGGML_NATIVE=OFF
           cmake --build b --target whisper-cli -j 4
       - name: Download converted model
         run: curl -fL -o model.bin https://github.com/${{ github.repository }}/releases/download/models-v1/ggml-fluister-turbo-q8_0.bin
-      - name: Transcribe sample (English)
+      - name: Make an Afrikaans test clip
+        run: |
+          espeak-ng -v af -s 140 -w af.wav "Goeiemore almal. Die begroting vir die nuwe kantoor in Pretoria is twee honderd duisend rand. Jan sal die verslag teen volgende Vrydag stuur. Die mure moet blou geverf word."
+          ffmpeg -loglevel error -y -i af.wav -ar 16000 -ac 1 af16.wav
+      - name: Transcribe
         run: |
           CLI=$(find b -name whisper-cli -type f | head -1)
-          "$CLI" -m model.bin -f whisper.cpp/samples/jfk.wav -l en -t 4 -bs 5 -ml 0
+          echo "== English, no prompt"; "$CLI" -m model.bin -f whisper.cpp/samples/jfk.wav -l en -t 4 -bs 5 -np
+          echo "== English, prompt"; "$CLI" -m model.bin -f whisper.cpp/samples/jfk.wav -l en -t 4 -bs 5 -np --prompt "Good morning everyone. Let's start the meeting. The budget is R15,000 and we meet again on 15 March."
+          echo "== Afrikaans, no prompt"; "$CLI" -m model.bin -f af16.wav -l af -t 4 -bs 5 -np
+          echo "== Afrikaans, prompt"; "$CLI" -m model.bin -f af16.wav -l af -t 4 -bs 5 -np --prompt "Goeiemôre almal. Ons begin die vergadering. Die begroting is R15 000 en ons vergader weer op 15 Maart."
