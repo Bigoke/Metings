@@ -30,6 +30,8 @@ class MetingsApp : Application() {
         private set
     lateinit var voices: VoiceBank
         private set
+    lateinit var corrections: com.bigoke.metings.data.CorrectionBook
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -39,7 +41,8 @@ class MetingsApp : Application() {
         prefs = Prefs(this)
         models = ModelManager(this)
         voices = VoiceBank(this)
-        pipeline = Pipeline(this, repo, models, prefs, voices)
+        corrections = com.bigoke.metings.data.CorrectionBook(this)
+        pipeline = Pipeline(this, repo, models, prefs, voices, corrections)
 
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH_RECORD, "Opname / Recording", NotificationManager.IMPORTANCE_LOW))

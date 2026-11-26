@@ -27,6 +27,7 @@ class Pipeline(
     private val models: ModelManager,
     private val prefs: Prefs,
     private val voices: VoiceBank,
+    private val corrections: com.bigoke.metings.data.CorrectionBook,
 ) {
     companion object {
         private const val TAG = "Pipeline"
@@ -121,7 +122,10 @@ class Pipeline(
                     report(id, "Adding punctuation", f, 0.80f, 0.86f)
                 }
                 m = m.copy(utterances = m.utterances.mapIndexed { i, u ->
-                    u.copy(text = TextCleaner.clean(fixed.getOrElse(i) { u.text }, m.language, false, settings.vocabulary))
+                    u.copy(text = TextCleaner.clean(
+                        fixed.getOrElse(i) { u.text }, u.lang.ifEmpty { m.language }, false, settings.vocabulary,
+                        corrections.asMap(), settings.translateSlang,
+                    ))
                 })
                 repo.save(m)
             }
@@ -229,12 +233,15 @@ class Pipeline(
         if (cancelled) throw InterruptedException("Stopped")
 
         // 2. Speech regions (silence removed), grouped into chunks of up to 5 minutes
+        val autoLang = m0.language == "auto"
+        // In Auto mode each part is short, so the language can switch between Afrikaans and English.
+        val chunkSeconds = if (autoLang) 90 else CHUNK_SECONDS
         val regions = speechRegions(turns, totalSamples)
         val chunks = ArrayList<List<Region>>()
         var cur = ArrayList<Region>(); var curLen = 0
         for (r in regions) {
             val len = r.end - r.start
-            if (curLen + len > CHUNK_SECONDS * SAMPLE_RATE && cur.isNotEmpty()) { chunks += cur; cur = ArrayList(); curLen = 0 }
+            if (curLen + len > chunkSeconds * SAMPLE_RATE && cur.isNotEmpty()) { chunks += cur; cur = ArrayList(); curLen = 0 }
             cur += r; curLen += len + GAP_SAMPLES
         }
         if (cur.isNotEmpty()) chunks += cur
@@ -245,12 +252,14 @@ class Pipeline(
         EngineGuard.log("whisper: ${runCatching { WhisperNative.systemInfo() }.getOrDefault("?")}; chunks=${chunks.size} threads=$threads beam=$beam")
         val t = Transcriber(models.file(ModelKind.TRANSCRIBE))
         transcriber = t
-        val basePrompt = if (m0.language == "af")
+        fun basePrompt(lang: String) = if (lang == "af")
             "Goeiemôre almal. Ons begin die vergadering. Die begroting is R15 000 en ons vergader weer op 15 Maart."
         else "Good morning everyone. Let's start the meeting. The budget is R15,000 and we meet again on 15 March."
         val vocab = prefs.settings.value.vocabulary
-        val vocabPrompt = if (vocab.isEmpty()) "" else vocab.take(40).joinToString(", ") + ". "
+        val hints = (vocab + corrections.hints()).distinct()
+        val vocabPrompt = if (hints.isEmpty()) "" else hints.take(40).joinToString(", ") + ". "
         var tail = ""
+        var lastLang = ""
         chunks.forEachIndexed { ci, regs ->
             if (cancelled) throw InterruptedException("Stopped")
             val pieces = ArrayList<Piece>()
@@ -272,17 +281,20 @@ class Pipeline(
                     try { Thread.sleep(700) } catch (_: InterruptedException) { break }
                 }
             }.apply { isDaemon = true; start() }
+            val lang = if (autoLang) runCatching { t.detectLanguage(buf, threads) }.getOrDefault("af") else m0.language
+            if (lang != lastLang) tail = ""
+            lastLang = lang
             val punctuatedTail = tail.takeIf { tl -> tl.count { it in ".?!," } >= 2 && tl.any { it.isUpperCase() } } ?: ""
-            val prompt = (vocabPrompt + basePrompt + " " + punctuatedTail).take(800)
+            val prompt = (vocabPrompt + basePrompt(lang) + " " + punctuatedTail).take(800)
             val got = try {
-                t.transcribe(buf, m0.language, threads, beam, prompt)
+                t.transcribe(buf, lang, threads, beam, prompt)
             } finally {
                 watcher.interrupt()
             }
             for (w in got) {
                 val s = mapTime(w.startMs, pieces)
                 val e = mapTime(w.endMs, pieces).coerceAtLeast(s)
-                words += w.copy(startMs = s, endMs = e)
+                words += w.copy(startMs = s, endMs = e, lang = lang)
             }
             tail = got.takeLast(40).joinToString(" ") { it.text }
         }
@@ -292,6 +304,9 @@ class Pipeline(
         // 4. Attach each word to the voice speaking at that moment, then build readable paragraphs
         report(id, "Making it readable", 0.5f, 0.80f, 0.82f)
         val utterances = buildUtterances(words, turns, m0.language, removeFillers, vocab)
+        // Meeting language = the language spoken most (for summaries, names and labels).
+        val meetingLang = if (!autoLang) m0.language else
+            utterances.groupBy { it.lang.ifEmpty { "af" } }.maxByOrNull { (_, us) -> us.sumOf { it.text.length } }?.key ?: "af"
         val ids = utterances.map { it.speaker }.distinct().sorted()
         val usedNames = HashSet<String>()
         val speakers = ids.map { sid ->
@@ -302,9 +317,10 @@ class Pipeline(
             if (known != null) {
                 usedNames += known.name
                 Speaker(sid, known.name, voiceprint = print, recognised = true)
-            } else Speaker(sid, com.bigoke.metings.data.defaultSpeakerName(sid, m0.language), voiceprint = print)
+            } else Speaker(sid, com.bigoke.metings.data.defaultSpeakerName(sid, meetingLang), voiceprint = print)
         }
         val m = m0.copy(
+            language = meetingLang,
             durationMs = durationMs,
             utterances = utterances,
             speakers = speakers,
@@ -367,12 +383,17 @@ class Pipeline(
         var start = 0L; var end = 0L
         val sb = StringBuilder()
         val unsure = ArrayList<String>()
+        val fixes = corrections.asMap()
+        val slang = prefs.settings.value.translateSlang
+        val langCount = HashMap<String, Int>()
         fun flush() {
             if (sb.isEmpty()) return
-            val text = TextCleaner.clean(sb.toString(), lang, removeFillers, vocab)
-            if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text, unsure = unsure.distinct())
+            val uLang = if (lang == "auto") (langCount.maxByOrNull { it.value }?.key ?: "af") else lang
+            val text = TextCleaner.clean(sb.toString(), uLang, removeFillers, vocab, fixes, slang)
+            if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text, unsure = unsure.distinct(), lang = uLang)
             sb.clear()
             unsure.clear()
+            langCount.clear()
         }
         var sincePunct = 0
         for (w in words) {
@@ -393,6 +414,7 @@ class Pipeline(
             sb.append(w.text)
             val core = w.text.trim { !it.isLetterOrDigit() }
             if (w.prob < 0.45f && core.length >= 3) unsure += core.lowercase()
+            if (w.lang.isNotEmpty()) langCount[w.lang] = (langCount[w.lang] ?: 0) + 1
             end = w.endMs
             if (w.text.last() in ".?!,;:…") sincePunct = 0 else sincePunct++
         }
@@ -403,7 +425,7 @@ class Pipeline(
             val prev = merged.lastOrNull()
             if (prev != null && u.text.split(" ").size <= 1 && u.startMs - prev.endMs < 1500) {
                 merged[merged.size - 1] = prev.copy(
-                    text = TextCleaner.clean(prev.text.trimEnd('.') + " " + u.text, lang, false, vocab),
+                    text = TextCleaner.clean(prev.text.trimEnd('.') + " " + u.text, prev.lang.ifEmpty { lang }, false, vocab),
                     endMs = u.endMs, unsure = (prev.unsure + u.unsure).distinct(),
                 )
             } else merged += u

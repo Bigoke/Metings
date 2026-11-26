@@ -40,8 +40,23 @@ object TextCleaner {
         }
     }
 
-    fun clean(raw: String, language: String, removeFillers: Boolean, vocab: List<String> = emptyList()): String {
+    /** Your own corrections, learned from earlier edits ("johannesberg" -> "Johannesburg"). */
+    private fun applyCorrections(t: String, corrections: Map<String, String>): String {
+        if (corrections.isEmpty()) return t
+        var out = t
+        for ((from, to) in corrections.entries.sortedByDescending { it.key.length }) {
+            val re = Regex("""(?i)(?<![\p{L}\d])""" + Regex.escape(from).replace(" ", """\E\s+\Q""") + """(?![\p{L}\d])""")
+            out = re.replace(out) { to }
+        }
+        return out
+    }
+
+    fun clean(
+        raw: String, language: String, removeFillers: Boolean, vocab: List<String> = emptyList(),
+        corrections: Map<String, String> = emptyMap(), translateSlang: Boolean = false,
+    ): String {
         var t = raw.replace(Regex("""\s+"""), " ").trim()
+        t = Language.spokenPhoneNumbers(t)
         if (removeFillers) {
             t = t.split(" ").filter { w ->
                 val core = w.lowercase().trim(',', '.', '!', '?', ';', ':', '…')
@@ -56,6 +71,8 @@ object TextCleaner {
             }
         }
         t = applyVocabulary(t, vocab)
+        t = applyCorrections(t, corrections)
+        if (translateSlang && language == "af") t = Language.translateSlang(t)
         // Collapse immediate word repeats ("die die" -> "die"), keep deliberate "baie baie" style only once.
         t = Regex("""\b(\p{L}+)(\s+\1\b)+""", RegexOption.IGNORE_CASE).replace(t) { it.groupValues[1] }
         // Tidy punctuation spacing.

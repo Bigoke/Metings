@@ -33,6 +33,8 @@ data class Utterance(
     val edited: Boolean = false,
     /** Words the speech model was unsure about (shown underlined so they can be checked). */
     val unsure: List<String> = emptyList(),
+    /** "af" or "en" — detected per paragraph when the meeting language is Auto. */
+    val lang: String = "",
 )
 
 @Serializable

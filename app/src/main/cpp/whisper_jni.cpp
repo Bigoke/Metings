@@ -68,6 +68,27 @@ Java_com_bigoke_metings_engine_WhisperNative_systemInfo(JNIEnv *env, jobject) {
     return env->NewStringUTF(whisper_print_system_info());
 }
 
+// Returns [p(af), p(en), p(nl)] for the first 30 s of the samples, or null on failure.
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_bigoke_metings_engine_WhisperNative_detectLanguage(
+        JNIEnv *env, jobject, jlong ptr, jfloatArray samples, jint threads) {
+    auto *ctx = reinterpret_cast<whisper_context *>(ptr);
+    if (!ctx) return nullptr;
+    jsize n = env->GetArrayLength(samples);
+    jfloat *data = env->GetFloatArrayElements(samples, nullptr);
+    int rc = whisper_pcm_to_mel(ctx, data, n, threads);
+    env->ReleaseFloatArrayElements(samples, data, JNI_ABORT);
+    if (rc != 0) return nullptr;
+    std::vector<float> probs(whisper_lang_max_id() + 1, 0.0f);
+    if (whisper_lang_auto_detect(ctx, 0, threads, probs.data()) < 0) return nullptr;
+    float out[3] = {
+        probs[whisper_lang_id("af")], probs[whisper_lang_id("en")], probs[whisper_lang_id("nl")],
+    };
+    jfloatArray arr = env->NewFloatArray(3);
+    env->SetFloatArrayRegion(arr, 0, 3, out);
+    return arr;
+}
+
 // Record layout per token: int32 t0 (10 ms units), int32 t1, int32 segment, float prob,
 // int32 byteLength, bytes[byteLength]
 extern "C" JNIEXPORT jbyteArray JNICALL

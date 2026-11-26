@@ -14,13 +14,14 @@ object WhisperNative {
     external fun requestAbort(value: Boolean)
     external fun progress(): Int
     external fun systemInfo(): String
+    external fun detectLanguage(ptr: Long, samples: FloatArray, threads: Int): FloatArray?
     external fun transcribe(
         ptr: Long, samples: FloatArray, language: String, threads: Int, beamSize: Int, prompt: String,
     ): ByteArray?
 }
 
 /** One recognised word with times in milliseconds relative to the audio passed in. */
-data class Word(val startMs: Long, val endMs: Long, val text: String, val prob: Float, val segment: Int)
+data class Word(val startMs: Long, val endMs: Long, val text: String, val prob: Float, val segment: Int, val lang: String = "")
 
 class Transcriber(modelFile: File) : AutoCloseable {
 
@@ -35,6 +36,15 @@ class Transcriber(modelFile: File) : AutoCloseable {
         val bytes = WhisperNative.transcribe(ctx, samples, language, threads, beamSize, prompt)
             ?: throw IllegalStateException("Transcription stopped")
         return parse(bytes)
+    }
+
+    /**
+     * "af" or "en" for this audio. Whisper often labels Afrikaans as Dutch, so Dutch counts as Afrikaans.
+     */
+    fun detectLanguage(samples: FloatArray, threads: Int): String {
+        val clip = if (samples.size > SAMPLE_RATE * 30) samples.copyOfRange(0, SAMPLE_RATE * 30) else samples
+        val p = WhisperNative.detectLanguage(ctx, clip, threads) ?: return "af"
+        return if (p[1] > (p[0] + p[2]) * 1.2f) "en" else "af"
     }
 
     fun progress(): Int = WhisperNative.progress()

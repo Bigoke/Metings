@@ -84,4 +84,32 @@ class ExtractorTest {
         println(t2)
         assertEquals("'n Paar dinge. Ons begin nou.", t2)
     }
+
+    @Test fun spokenPhone() {
+        val a = com.bigoke.metings.engine.Language.spokenPhoneNumbers("bel my by nul agt twee vyf vyf vyf een twee drie vier asseblief")
+        println(a); assertTrue(a.contains("082 555 1234"))
+        val b = com.bigoke.metings.engine.Language.spokenPhoneNumbers("call me on zero eight two double five five, twelve thirty four")
+        println(b); assertTrue(b.contains("082 555 1234"))
+        val e = run("Bel vir Piet by 082 55 51 234 more.")
+        assertTrue(e.any { it.type == EntityType.PHONE && it.value == "+27825551234" })
+        val t = TextCleaner.clean("sy nommer is nul ses een een twee drie vier vyf ses sewe", "af", true)
+        println(t); assertTrue(t.contains("061 123 4567"))
+    }
+
+    @Test fun slang() {
+        val t = com.bigoke.metings.engine.Language.translateSlang("Die meeting was baie nice. The deadline is tomorrow.")
+        println(t)
+        assertTrue(t.startsWith("Die vergadering was baie lekker."))
+        assertTrue(t.contains("The deadline is tomorrow."))
+    }
+
+    @Test fun learning() {
+        val d = com.bigoke.metings.data.CorrectionBook.diff(
+            "ons gaan na johannesberg om die kanto te sien", "Ons gaan na Johannesburg om die kantoor te sien")
+        println(d)
+        assertTrue(d.contains("johannesberg" to "Johannesburg"))
+        assertTrue(d.contains("kanto" to "kantoor"))
+        val fixed = TextCleaner.clean("ons ry johannesberg toe", "af", false, emptyList(), mapOf("johannesberg" to "Johannesburg"))
+        println(fixed); assertEquals("Ons ry Johannesburg toe.", fixed)
+    }
 }

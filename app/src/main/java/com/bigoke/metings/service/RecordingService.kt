@@ -147,7 +147,7 @@ class RecordingService : Service() {
         meetingId = id
         val now = System.currentTimeMillis()
         val title = titleIn.ifBlank {
-            (if (language == "af") "Vergadering " else "Meeting ") + SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()).format(Date(now))
+            (if (language == "af" || (language == "auto" && Ui.isAf())) "Vergadering " else "Meeting ") + SimpleDateFormat("d MMM yyyy, HH:mm", Locale.getDefault()).format(Date(now))
         }
         val wavFile = File(app.repo.folder(id), "audio.wav")
         app.repo.save(Meeting(id = id, title = title, createdAt = now, language = language, status = MeetingStatus.RECORDING, expectedSpeakers = expectedSpeakers, folder = folder, template = template))

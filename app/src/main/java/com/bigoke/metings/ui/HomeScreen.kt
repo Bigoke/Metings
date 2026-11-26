@@ -12,7 +12,13 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.animation.animateContentSize
 import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.SelectAll
@@ -99,6 +105,10 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
     var query by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf(setOf<String>()) }
+    val snackbar = remember { SnackbarHostState() }
+    val deletedMsg = tr("deleted", "geskrap")
+    val undoLabel = tr("Undo", "Ontdoen")
     BackHandler(enabled = selected.isNotEmpty()) { selected = emptySet() }
 
     fun transcribe(ids: Collection<String>) {
@@ -146,8 +156,8 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
         }
     }
 
-    val filtered = remember(meetings, query, folder) {
-        meetings.filter { m -> folder == null || m.folder == folder }.filter { m ->
+    val filtered = remember(meetings, query, folder, pendingDelete) {
+        meetings.filter { m -> m.id !in pendingDelete && (folder == null || m.folder == folder) }.filter { m ->
             if (query.isBlank()) true else {
                 val q = query.lowercase()
                 m.title.lowercase().contains(q) || m.summary?.overview?.lowercase()?.contains(q) == true ||
@@ -212,52 +222,30 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
         LazyColumn(
             Modifier.fillMaxSize().padding(pad),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 140.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (!coreReady) {
+            val folderOk = app.models.sharedAllowed()
+            val steps = listOf(coreReady, folderOk, batteryOk)
+            if (steps.any { !it }) {
                 item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                        modifier = Modifier.fillMaxWidth().clickable { onModels() },
-                    ) {
-                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Outlined.CloudDownload, null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(tr("Download the offline models", "Laai die vanlyn-modelle af"), style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    tr("One-time download of about ${formatBytes(app.models.totalBytes)}. After that everything works without internet.",
-                                        "Eenmalige aflaai van sowat ${formatBytes(app.models.totalBytes)}. Daarna werk alles sonder internet."),
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                            TextButton(onClick = onModels) { Text(tr("Set up", "Stel op")) }
-                        }
-                    }
-                }
-            }
-            if (!batteryOk && meetings.any { it.status == MeetingStatus.QUEUED || it.status == MeetingStatus.PROCESSING || it.status == MeetingStatus.READY }) {
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(1.dp), modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp)) {
-                            Text(tr("Let Notule work in the background", "Laat Notule in die agtergrond werk"), style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                tr("Your phone's battery saver can stop Notule while it processes a meeting. Allow it to run in the background so transcripts always finish.",
-                                    "Jou foon se batterybespaarder kan Notule stop terwyl dit 'n vergadering verwerk. Laat dit in die agtergrond loop sodat transkripsies altyd klaarmaak."),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            TextButton(onClick = {
-                                runCatching {
-                                    ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName)))
-                                }
-                            }) { Text(tr("Allow", "Laat toe")) }
+                            Text(tr("Get Notule ready", "Maak Notule gereed") + "  ·  ${steps.count { it }}/3", style = MaterialTheme.typography.titleSmall)
+                            Spacer(Modifier.height(6.dp))
+                            LinearProgressIndicator(progress = { steps.count { it } / 3f }, modifier = Modifier.fillMaxWidth())
+                            Spacer(Modifier.height(8.dp))
+                            SetupStep(coreReady, tr("Download the offline models (${formatBytes(app.models.totalBytes)}, once)", "Laai die vanlyn-modelle af (${formatBytes(app.models.totalBytes)}, eenmalig)"),
+                                tr("Open", "Maak oop"), onModels)
+                            SetupStep(folderOk, tr("Keep models safe through updates", "Hou modelle veilig deur opdaterings"), tr("Open", "Maak oop"), onModels)
+                            SetupStep(batteryOk, tr("Allow processing in the background", "Laat verwerking in die agtergrond toe"), tr("Allow", "Laat toe")) {
+                                runCatching { ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + ctx.packageName))) }
+                            }
                         }
                     }
                 }
@@ -345,8 +333,14 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                     confirmDelete = false
                     val busy = meetings.any { it.id in selected && (it.status == MeetingStatus.PROCESSING) }
                     if (busy) ProcessingService.cancel(ctx)
-                    selected.forEach { app.repo.delete(it) }
+                    val ids = selected
                     selected = emptySet()
+                    pendingDelete = pendingDelete + ids
+                    scope.launch {
+                        val res = snackbar.showSnackbar("${ids.size} $deletedMsg", actionLabel = undoLabel, duration = SnackbarDuration.Long)
+                        if (res == SnackbarResult.ActionPerformed) pendingDelete = pendingDelete - ids
+                        else { withContext(Dispatchers.IO) { ids.forEach { app.repo.delete(it) } }; pendingDelete = pendingDelete - ids }
+                    }
                 }) { Text(tr("Delete", "Skrap"), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(tr("Cancel", "Kanselleer")) } },
@@ -361,7 +355,7 @@ private fun MeetingCard(
     onClick: () -> Unit, onLongClick: () -> Unit, onTranscribe: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        modifier = Modifier.fillMaxWidth().animateContentSize().combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
@@ -381,8 +375,19 @@ private fun MeetingCard(
                     Text(" " + m.folder, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
                 }
             }
-            Spacer(Modifier.height(2.dp))
-            Text(formatDate(m.createdAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(formatDate(m.createdAt), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f))
+                when (m.status) {
+                    MeetingStatus.READY -> StatusPill(tr("Ready", "Gereed"), MaterialTheme.colorScheme.secondary)
+                    MeetingStatus.NEW -> StatusPill(tr("Not transcribed", "Nie getranskribeer"), MaterialTheme.colorScheme.onSurfaceVariant)
+                    MeetingStatus.QUEUED -> StatusPill(tr("Waiting", "Wag"), MaterialTheme.colorScheme.primary)
+                    MeetingStatus.PROCESSING -> StatusPill(p?.let { "${(it.overall * 100).toInt()}%" } ?: tr("Working", "Besig"), MaterialTheme.colorScheme.primary)
+                    MeetingStatus.FAILED -> StatusPill(tr("Needs attention", "Aandag nodig"), MaterialTheme.colorScheme.error)
+                    MeetingStatus.RECORDING -> StatusPill("● REC", RecordRed)
+                }
+            }
             Spacer(Modifier.height(10.dp))
             when (m.status) {
                 MeetingStatus.READY -> {
@@ -429,6 +434,20 @@ private fun MeetingCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SetupStep(done: Boolean, label: String, action: String, onAction: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            if (done) Icons.Outlined.CheckCircle else Icons.Outlined.RadioButtonUnchecked, null,
+            tint = if (done) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.outline, modifier = Modifier.size(20.dp),
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
+            color = if (done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface)
+        if (!done) TextButton(onClick = onAction) { Text(action) }
     }
 }
 

@@ -64,6 +64,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
@@ -148,6 +152,10 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
         if (query.length < 2) emptyList() else m.utterances.indices.filter { m.utterances[it].text.contains(query, ignoreCase = true) }
     }
 
+    val snackbar = remember { SnackbarHostState() }
+    val learnedMsg = tr("Learned: ", "Geleer: ")
+    val fixAllLabel = tr("Fix everywhere", "Herstel oral")
+
     fun save(change: (Meeting) -> Meeting) {
         scope.launch(Dispatchers.Default) { app.repo.update(id, change) }
     }
@@ -204,6 +212,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                 },
             )
         },
+        snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Column {
                 if (searching && query.length >= 2) {
@@ -352,16 +361,44 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                             }
                         }
                         Spacer(Modifier.height(8.dp))
-                        OutlinedTextField(text, { text = it }, minLines = 4)
+                        OutlinedTextField(text, { text = it }, minLines = 4, modifier = Modifier.fillMaxWidth())
+                        Text(
+                            tr("Notule learns from your corrections and fixes the same words in future transcripts.",
+                                "Notule leer uit jou regstellings en herstel dieselfde woorde in toekomstige transkripsies."),
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
                     }
                 },
                 confirmButton = {
                     TextButton(onClick = {
                         editing = null
+                        val newText = text
+                        // Learn from the edit: word changes are remembered and fixed in future transcripts.
+                        val learned = com.bigoke.metings.data.CorrectionBook.diff(u.text, newText)
                         save { mm ->
                             reExtract(mm.copy(utterances = mm.utterances.mapIndexed { i, x ->
-                                if (i == idx) x.copy(text = TextCleaner.clean(text, mm.language, false), speaker = spk, edited = true, unsure = emptyList()) else x
+                                if (i == idx) x.copy(text = TextCleaner.clean(newText, x.lang.ifEmpty { mm.language }, false), speaker = spk, edited = true, unsure = emptyList()) else x
                             }))
+                        }
+                        if (learned.isNotEmpty()) {
+                            app.corrections.add(learned)
+                            val others = m.utterances.withIndex().count { (i, x) ->
+                                i != idx && learned.any { (f, _) -> x.text.contains(f, ignoreCase = true) }
+                            }
+                            scope.launch {
+                                val msg = learnedMsg + learned.joinToString(", ") { (f, t) -> "$f → $t" }
+                                val res = snackbar.showSnackbar(
+                                    msg, actionLabel = if (others > 0) fixAllLabel + " ($others)" else null,
+                                    withDismissAction = true, duration = SnackbarDuration.Long,
+                                )
+                                if (res == SnackbarResult.ActionPerformed) save { mm ->
+                                    val map = learned.toMap()
+                                    reExtract(mm.copy(utterances = mm.utterances.map { x ->
+                                        x.copy(text = TextCleaner.clean(x.text, x.lang.ifEmpty { mm.language }, false, emptyList(), map))
+                                    }))
+                                }
+                            }
                         }
                     }) { Text(tr("Save", "Stoor")) }
                 },

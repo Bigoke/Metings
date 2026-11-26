@@ -2,6 +2,7 @@ package com.bigoke.metings.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -44,7 +45,32 @@ fun formatDuration(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
 }
 
-fun formatDate(ms: Long): String = SimpleDateFormat("EEE d MMM yyyy · HH:mm", Locale.getDefault()).format(Date(ms))
+/** "Today · 14:12", "Yesterday · 09:30", "Mon 24 Nov · 15:00", "12 Mar 2025 · 10:00". */
+fun formatDate(ms: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val d = java.time.Instant.ofEpochMilli(ms).atZone(zone).toLocalDate()
+    val today = java.time.LocalDate.now(zone)
+    val loc = if (com.bigoke.metings.util.Ui.isAf()) Locale("af", "ZA") else Locale.getDefault()
+    val time = SimpleDateFormat("HH:mm", loc).format(Date(ms))
+    val day = when {
+        d == today -> com.bigoke.metings.util.Ui.t("Today", "Vandag")
+        d == today.minusDays(1) -> com.bigoke.metings.util.Ui.t("Yesterday", "Gister")
+        d.year == today.year -> SimpleDateFormat("EEE d MMM", loc).format(Date(ms))
+        else -> SimpleDateFormat("d MMM yyyy", loc).format(Date(ms))
+    }
+    return "$day · $time"
+}
+
+/** Small coloured status label used on meeting cards. */
+@Composable
+fun StatusPill(text: String, color: Color) {
+    Box(
+        Modifier.background(color.copy(alpha = 0.14f), androidx.compose.foundation.shape.RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+    ) {
+        Text(text, color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
+    }
+}
 
 fun formatBytes(b: Long): String = when {
     b >= 1L shl 30 -> "%.2f GB".format(b / (1L shl 30).toDouble())

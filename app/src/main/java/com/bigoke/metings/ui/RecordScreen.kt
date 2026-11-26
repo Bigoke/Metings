@@ -33,8 +33,16 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedbackDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilterChip
@@ -93,8 +101,11 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
     var template by remember { mutableStateOf(settings.lastTemplate) }
     var wasActive by remember { mutableStateOf(rec.active) }
     var permissionDenied by remember { mutableStateOf(false) }
+    var confirmStop by remember { mutableStateOf(false) }
+    val haptic = LocalHapticFeedback.current
 
     fun begin() {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         app.prefs.update { it.copy(lastFolder = folder.trim(), lastTemplate = template) }
         RecordingService.start(ctx, title, lang, speakers, folder.trim(), template)
     }
@@ -141,12 +152,14 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
                 SectionTitle(tr("Main language", "Hooftaal"), Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    listOf("af" to "Afrikaans", "en" to "English").forEachIndexed { i, (code, label) ->
-                        SegmentedButton(selected = lang == code, onClick = { lang = code }, shape = SegmentedButtonDefaults.itemShape(i, 2)) { Text(label) }
+                    listOf("auto" to tr("Auto", "Outo"), "af" to "Afrikaans", "en" to "English").forEachIndexed { i, (code, label) ->
+                        SegmentedButton(selected = lang == code, onClick = { lang = code }, shape = SegmentedButtonDefaults.itemShape(i, 3)) { Text(label) }
                     }
                 }
                 Text(
-                    tr("Mixing Afrikaans and English is fine — choose the language spoken most.",
+                    if (lang == "auto") tr("Notule recognises Afrikaans and English by itself, also when people switch.",
+                        "Notule herken self Afrikaans en Engels, ook wanneer mense wissel.")
+                    else tr("Mixing Afrikaans and English is fine — choose the language spoken most.",
                         "Afrikaans en Engels gemeng is reg — kies die taal wat die meeste gepraat word."),
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
@@ -233,12 +246,12 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
                 }
                 Spacer(Modifier.height(40.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                    OutlinedIconButton(onClick = { RecordingService.bookmark(ctx) }, modifier = Modifier.size(60.dp),
+                    OutlinedIconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); RecordingService.bookmark(ctx) }, modifier = Modifier.size(60.dp),
                         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
                         Icon(Icons.Outlined.BookmarkAdd, tr("Bookmark", "Boekmerk"))
                     }
                     FilledIconButton(
-                        onClick = { RecordingService.stop(ctx) },
+                        onClick = { confirmStop = true },
                         modifier = Modifier.size(88.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = RecordRed),
                     ) { Icon(Icons.Filled.Stop, tr("Stop", "Stop"), Modifier.size(40.dp)) }
@@ -256,6 +269,21 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
+    if (confirmStop) {
+        AlertDialog(
+            onDismissRequest = { confirmStop = false },
+            title = { Text(tr("Stop recording?", "Stop opname?")) },
+            text = { Text(tr("The recording (${formatDuration(rec.elapsedMs)}) is saved to this phone.", "Die opname (${formatDuration(rec.elapsedMs)}) word op hierdie foon gestoor.")) },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmStop = false
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    RecordingService.stop(ctx)
+                }) { Text(tr("Stop and save", "Stop en stoor")) }
+            },
+            dismissButton = { TextButton(onClick = { confirmStop = false }) { Text(tr("Keep recording", "Hou aan opneem")) } },
+        )
     }
 }
 

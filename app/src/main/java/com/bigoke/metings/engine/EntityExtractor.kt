@@ -137,6 +137,18 @@ class EntityExtractor(meetingTime: Long, vocabulary: List<String> = emptyList())
             else if (digits.startsWith("0")) digits = "+27" + digits.drop(1)
             c.add(EntityType.PHONE, m.range.first, m.range.last + 1, digits)
         }
+        // Any grouping of digits that adds up to a South African number: "082 55 51 234", "0 8 2 5 5 5 1 2 3 4".
+        Regex("""(?<![\d+])\+?\d[\d \-]{8,18}\d(?!\d)""").findAll(c.text).forEach { m ->
+            val digits = m.value.filter { it.isDigit() }
+            val plus = m.value.startsWith("+")
+            val value = when {
+                digits.length == 10 && digits.startsWith("0") -> "+27" + digits.drop(1)
+                digits.length == 11 && digits.startsWith("27") -> "+$digits"
+                plus && digits.length in 10..13 -> "+$digits"
+                else -> null
+            }
+            if (value != null) c.add(EntityType.PHONE, m.range.first, m.range.last + 1, value)
+        }
         Regex("""(?<![\d+])\+\d{1,3}[\s-]?\d[\d\s-]{7,13}\d(?!\d)""").findAll(c.text).forEach { m ->
             c.add(EntityType.PHONE, m.range.first, m.range.last + 1, m.value.filter { it.isDigit() || it == '+' })
         }

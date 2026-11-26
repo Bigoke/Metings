@@ -72,6 +72,7 @@ fun SettingsScreen(onBack: () -> Unit, onModels: () -> Unit) {
     val prefs = app.prefs
     val s by prefs.settings.collectAsStateWithLifecycle()
     val voices by app.voices.voices.collectAsStateWithLifecycle()
+    val learned by app.corrections.items.collectAsStateWithLifecycle()
     var vocabText by remember { mutableStateOf(s.vocabulary.joinToString("\n")) }
     var company by remember { mutableStateOf(s.companyName) }
     var preparedBy by remember { mutableStateOf(s.preparedBy) }
@@ -105,7 +106,14 @@ fun SettingsScreen(onBack: () -> Unit, onModels: () -> Unit) {
             Spacer(Modifier.height(14.dp))
             Text(tr("Default meeting language", "Verstek vergaderingtaal"), style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(6.dp))
-            Segmented(listOf("af" to "Afrikaans", "en" to "English"), s.language) { v -> prefs.update { it.copy(language = v) } }
+            Segmented(listOf("auto" to tr("Auto", "Outo"), "af" to "Afrikaans", "en" to "English"), s.language) { v -> prefs.update { it.copy(language = v) } }
+            Text(tr("Auto recognises Afrikaans and English by itself, also when people switch between them.",
+                "Outo herken self Afrikaans en Engels, ook wanneer mense tussen die twee wissel."),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+            ToggleRow(tr("Translate English slang", "Vertaal Engelse sleng"),
+                tr("In Afrikaans sentences, words like “nice”, “meeting” or “deadline” become “lekker”, “vergadering”, “sperdatum”.",
+                    "In Afrikaanse sinne word woorde soos “nice”, “meeting” of “deadline” “lekker”, “vergadering”, “sperdatum”."),
+                s.translateSlang) { v -> prefs.update { it.copy(translateSlang = v) } }
             Spacer(Modifier.height(14.dp))
             Text(tr("Summary language", "Opsommingtaal"), style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(6.dp))
@@ -125,6 +133,23 @@ fun SettingsScreen(onBack: () -> Unit, onModels: () -> Unit) {
             )
             TextButton(onClick = { prefs.update { it.copy(vocabulary = vocabText.lines().map { l -> l.trim() }.filter { l -> l.isNotEmpty() }) } }) {
                 Text(tr("Save words", "Stoor woorde"))
+            }
+
+            HorizontalDivider(Modifier.padding(vertical = 18.dp))
+            SectionTitle(tr("Learned corrections", "Geleerde regstellings"), Modifier.padding(bottom = 4.dp))
+            if (learned.isEmpty()) Text(
+                tr("None yet. When you edit a transcript, Notule remembers the corrected words and fixes them next time.",
+                    "Nog geen. Wanneer jy 'n transkripsie wysig, onthou Notule die reggestelde woorde en herstel dit volgende keer."),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            learned.forEach { c ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(c.from, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textDecoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)
+                    Text("  →  ", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(c.to, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { app.corrections.remove(c.from) }) { Icon(Icons.Outlined.Delete, tr("Forget", "Vergeet")) }
+                }
             }
 
             HorizontalDivider(Modifier.padding(vertical = 18.dp))

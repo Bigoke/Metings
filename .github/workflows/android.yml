@@ -81,12 +81,14 @@ jobs:
           VERSION="1.0.${GITHUB_RUN_NUMBER}"
           mkdir -p out
           cp app/build/outputs/apk/release/app-release.apk "out/Notule-${VERSION}.apk"
+          # Same file under a fixed name: .../releases/latest/download/Notule.apk always gets the newest version
+          cp app/build/outputs/apk/release/app-release.apk "out/Notule.apk"
           ls -lh out
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Inspect APK
         run: |
-          APK=$(ls out/*.apk)
+          APK=$(ls out/Notule-*.apk)
           unzip -l "$APK" | grep "\.so$" | sort -k1 -n -r
           BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
           "$BT/zipalign" -c -P 16 -v 4 "$APK" | tail -3 || true

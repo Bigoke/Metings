@@ -5,8 +5,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 data class Settings(
-    /** Meeting (speech) language: "af", "en" */
-    val language: String = "af",
+    /** Meeting (speech) language: "auto" (detect Afrikaans/English per part), "af", "en" */
+    val language: String = "auto",
+    /** Replace English slang with the Afrikaans word in Afrikaans sentences. */
+    val translateSlang: Boolean = true,
     /** "same" = same as meeting language, "af", "en" */
     val summaryLanguage: String = "same",
     /** App menus and buttons: "system", "af", "en" */
@@ -35,7 +37,8 @@ class Prefs(context: Context) {
     val settings: StateFlow<Settings> = _settings
 
     private fun load() = Settings(
-        language = sp.getString("language", "af") ?: "af",
+        language = sp.getString("language", "auto") ?: "auto",
+        translateSlang = sp.getBoolean("translateSlang", true),
         summaryLanguage = sp.getString("summaryLanguage", "same") ?: "same",
         uiLanguage = sp.getString("uiLanguage", "system") ?: "system",
         removeFillers = sp.getBoolean("removeFillers", true),
@@ -58,6 +61,7 @@ class Prefs(context: Context) {
         val s = change(_settings.value)
         sp.edit()
             .putString("language", s.language)
+            .putBoolean("translateSlang", s.translateSlang)
             .putString("summaryLanguage", s.summaryLanguage)
             .putString("uiLanguage", s.uiLanguage)
             .putBoolean("removeFillers", s.removeFillers)
