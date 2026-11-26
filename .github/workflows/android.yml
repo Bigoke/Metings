@@ -73,7 +73,7 @@ jobs:
           fi
 
       - name: Build release APK
-        run: gradle :app:assembleRelease --stacktrace --no-daemon
+        run: gradle :app:testReleaseUnitTest :app:assembleRelease --stacktrace --no-daemon
 
       - name: Rename APK
         id: apk

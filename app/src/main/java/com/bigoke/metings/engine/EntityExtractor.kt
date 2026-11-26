@@ -59,6 +59,12 @@ class EntityExtractor(meetingTime: Long) {
             "dae", "days", "weke", "weeks", "maande", "months", "jaar", "jare", "years", "hektaar", "hectares",
         )
         private val nameParticles = setOf("van", "der", "den", "du", "de", "le", "la", "von")
+        // Names that are also ordinary words: only treated as names when written with a capital.
+        private val ambiguousLower = setOf(
+            "strand", "springs", "parys", "ceres", "wellington", "robertson", "montagu", "perth", "holland", "brits",
+            "mark", "will", "bill", "grant", "dean", "lee", "sam", "kim", "neo", "mona", "ina", "frans", "rina",
+            "louw", "nel", "smit", "roos", "musa", "zama", "precious",
+        )
 
         private val taskAf = listOf(
             "ek sal", "ons sal", "ek gaan", "ons gaan", "jy moet", "julle moet", "ons moet", "hy moet", "sy moet",
@@ -331,14 +337,15 @@ class EntityExtractor(meetingTime: Long) {
         var i = 0
         while (i < toks.size) {
             var matched = false
-            if (toks[i].cap) {
+            val lowerOk = toks[i].w.length >= 4 && toks[i].f !in ambiguousLower
+            if (toks[i].cap || lowerOk) {
                 for (n in Gazetteer.maxPlaceWords downTo 1) {
                     if (i + n > toks.size) continue
                     val phrase = toks.subList(i, i + n).joinToString(" ") { it.f }
                     val canonical = Gazetteer.places[phrase] ?: continue
                     if (c.add(EntityType.PLACE, toks[i].s, toks[i + n - 1].e, canonical)) { i += n; matched = true; break }
                 }
-                if (!matched && toks[i].w.length >= 6 && toks[i].f !in Gazetteer.firstNames) {
+                if (!matched && toks[i].cap && toks[i].w.length >= 6 && toks[i].f !in Gazetteer.firstNames) {
                     Fuzzy.best(toks[i].w, Gazetteer.placeSingleWords, 0.93)?.let { key ->
                         if (c.add(EntityType.PLACE, toks[i].s, toks[i].e, Gazetteer.places[key] ?: toks[i].w)) { i++; matched = true }
                     }
@@ -363,7 +370,8 @@ class EntityExtractor(meetingTime: Long) {
             val unknownCap = t.cap && !isSentenceStart(c.text, t.s) && t.w.length >= 3 &&
                 t.f !in Gazetteer.stopCapitalised && Gazetteer.months[t.f] == null && Gazetteer.weekdays[t.f] == null &&
                 !t.w.all { it.isUpperCase() || it.isDigit() } && t.w.none { it.isDigit() }
-            if (t.cap && (known || prevIsTitle || unknownCap) && t.f !in Gazetteer.stopCapitalised) {
+            val lowerKnown = !t.cap && known && t.f !in ambiguousLower && t.w.length >= 3
+            if (((t.cap && (known || prevIsTitle || unknownCap)) || lowerKnown) && t.f !in Gazetteer.stopCapitalised) {
                 val start = if (prevIsTitle) toks[i - 1].s else t.s
                 var j = i + 1
                 // Extend with surname particles and further capitalised words: "Jan van der Merwe".
@@ -371,7 +379,10 @@ class EntityExtractor(meetingTime: Long) {
                     toks[j].f !in Gazetteer.stopCapitalised && Gazetteer.places[toks[j].f] == null
                 ) j++
                 while (j - 1 > i && toks[j - 1].f in nameParticles) j--
-                if (c.add(EntityType.PERSON, start, toks[j - 1].e, c.text.substring(t.s, toks[j - 1].e))) { i = j; continue }
+                val name = c.text.substring(t.s, toks[j - 1].e).split(' ').joinToString(" ") { w ->
+                    if (w in nameParticles) w else w.replaceFirstChar { ch -> ch.uppercase() }
+                }
+                if (c.add(EntityType.PERSON, start, toks[j - 1].e, name)) { i = j; continue }
             }
             i++
         }
@@ -390,27 +401,45 @@ class EntityExtractor(meetingTime: Long) {
 
     // ---------------------------------------------------------------- tasks
 
+    private val actionVerbs = setOf(
+        "stuur", "bel", "maak", "doen", "reel", "reël", "betaal", "lewer", "voltooi", "finaliseer", "bestel", "kontak",
+        "skryf", "berei", "kry", "koop", "send", "call", "prepare", "finish", "submit", "deliver", "pay", "order",
+        "contact", "write", "book", "arrange", "complete", "update", "check", "confirm", "bevestig",
+    )
+    private val modalAfterName = setOf("sal", "gaan", "moet", "will", "must", "should", "gaan")
+
     private fun tasks(c: Ctx, u: Utterance, speakerNames: Map<Int, String>) {
         val t = c.text
         Regex("""[^.!?…]+[.!?…]?""").findAll(t).forEach { m ->
             val sentence = m.value
-            val low = " " + Fuzzy.fold(sentence) + " "
-            val hit = (taskAf + taskEn).firstOrNull { low.contains(" " + Fuzzy.fold(it) + " ") || low.contains(" " + Fuzzy.fold(it) + ",") }
-                ?: return@forEach
-            val owner = when {
-                hit in selfTask -> speakerNames[u.speaker] ?: "Person ${u.speaker + 1}"
-                else -> c.list.firstOrNull { it.type == EntityType.PERSON && it.start >= m.range.first && it.end <= m.range.last + 1 }?.text ?: ""
-            }
-            val due = c.list.firstOrNull { it.type == EntityType.DATE && it.start >= m.range.first && it.end <= m.range.last + 1 }?.value ?: ""
-            val s = m.range.first
-            val e = m.range.last + 1
-            // Tasks overlap other details by design, so they bypass the "taken" check.
             val text = sentence.trim()
-            if (text.length >= 8) {
-                val off = sentence.indexOf(text)
-                c.list.add(Entity(EntityType.TASK, text, "$owner|$due", c.ui, s + off, s + off + text.length))
+            if (text.length < 8) return@forEach
+            val sStart = m.range.first
+            val sEnd = m.range.last + 1
+            val low = " " + Fuzzy.fold(sentence).replace(Regex("""[,;:]"""), " ") + " "
+            val inSentence = c.list.filter { it.start >= sStart && it.end <= sEnd }
+            val persons = inSentence.filter { it.type == EntityType.PERSON }
+            val date = inSentence.firstOrNull { it.type == EntityType.DATE }?.value ?: ""
+            val words = low.trim().split(Regex("""\s+"""))
+
+            val phrase = (taskAf + taskEn).firstOrNull { low.contains(" " + Fuzzy.fold(it) + " ") }
+            // "Jan sal …", "Sarah will …": a named person followed by a commitment word.
+            val namedOwner = persons.firstOrNull { p ->
+                val after = t.substring(p.end).trimStart().split(Regex("""\s+""")).firstOrNull()?.let { Fuzzy.fold(it) }
+                after in modalAfterName
             }
-            if (e < 0) return@forEach
+            val dueAction = date.isNotEmpty() && words.any { it in actionVerbs }
+            if (phrase == null && namedOwner == null && !dueAction) return@forEach
+
+            val owner = when {
+                namedOwner != null -> namedOwner.value.ifEmpty { namedOwner.text }
+                phrase != null && phrase in selfTask -> speakerNames[u.speaker] ?: "Person ${u.speaker + 1}"
+                persons.isNotEmpty() -> persons.first().value.ifEmpty { persons.first().text }
+                else -> ""
+            }
+            val off = sentence.indexOf(text)
+            // Tasks overlap other details by design, so they bypass the "taken" check.
+            c.list.add(Entity(EntityType.TASK, text, "$owner|$date", c.ui, sStart + off, sStart + off + text.length))
         }
     }
 

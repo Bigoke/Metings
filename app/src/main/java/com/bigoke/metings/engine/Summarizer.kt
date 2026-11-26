@@ -16,7 +16,82 @@ import com.google.ai.edge.litertlm.SamplerConfig
 import java.io.File
 
 /** Writes the meeting summary with Gemma on the phone; falls back to picking key sentences. */
-class Summarizer(private val context: Context) {
+class Summarizer(
+    private val context: Context,
+    private val modelFile: File?,
+    private val useGpu: Boolean,
+) : AutoCloseable {
+
+    private var engine: Engine? = null
+
+    private fun engine(): Engine = engine ?: openEngine(modelFile!!, useGpu).also { engine = it }
+
+    override fun close() {
+        runCatching { engine?.close() }
+        engine = null
+    }
+
+    private fun needsPunctuation(t: String): Boolean {
+        val words = t.split(' ').size
+        if (words < 8) return false
+        val marks = t.dropLast(1).count { it in ".?!,;:" }
+        return marks * 18 < words || t.count { it.isUpperCase() } <= 1
+    }
+
+    /**
+     * Adds punctuation and capital letters to transcript paragraphs that lack them, without changing words.
+     * Returns the input unchanged for any paragraph where the AI changed the words.
+     */
+    fun punctuate(lines: List<String>, language: String, onProgress: (Float) -> Unit): List<String> {
+        if (modelFile == null || !modelFile.exists()) return lines
+        val todo = lines.indices.filter { needsPunctuation(lines[it]) }
+        if (todo.isEmpty()) return lines
+        val out = lines.toMutableList()
+        val lang = langName(language)
+        val system = "You restore punctuation and capitalisation in $lang (and English) speech transcripts. " +
+            "You never change, add, remove, translate or reorder words."
+        val batches = ArrayList<List<Int>>()
+        var cur = ArrayList<Int>(); var len = 0
+        for (i in todo) {
+            if (len + lines[i].length > 2500 && cur.isNotEmpty()) { batches += cur; cur = ArrayList(); len = 0 }
+            cur += i; len += lines[i].length
+        }
+        if (cur.isNotEmpty()) batches += cur
+        try {
+            val eng = engine()
+            batches.forEachIndexed { bi, batch ->
+                val prompt = "Add correct punctuation (full stops, commas, question marks) and capital letters " +
+                    "(sentence starts, names of people, places, companies, months and days) to each numbered line. " +
+                    "Keep every word exactly as written and in the same order. Answer with the same numbered lines only.\n\n" +
+                    batch.mapIndexed { k, i -> "${k + 1}| ${lines[i]}" }.joinToString("\n")
+                val answer = runCatching { ask(eng, system, prompt) }.getOrNull()
+                if (answer != null) {
+                    val parsed = HashMap<Int, String>()
+                    Regex("""^\s*(\d+)\s*[|.):]\s*(.+)$""", RegexOption.MULTILINE).findAll(answer).forEach { m ->
+                        parsed[m.groupValues[1].toInt()] = m.groupValues[2].trim()
+                    }
+                    batch.forEachIndexed { k, i ->
+                        val fixed = parsed[k + 1]
+                        if (fixed != null && sameWords(lines[i], fixed)) out[i] = fixed
+                    }
+                }
+                onProgress((bi + 1f) / batches.size)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Punctuation pass failed", t)
+        }
+        return out
+    }
+
+    private fun normWords(t: String) = Fuzzy.fold(t).split(Regex("""[^\p{L}\d']+""")).filter { it.isNotEmpty() }
+
+    private fun sameWords(a: String, b: String): Boolean {
+        val x = normWords(a); val y = normWords(b)
+        if (x == y) return true
+        if (x.size != y.size || x.isEmpty()) return false
+        val same = x.indices.count { x[it] == y[it] }
+        return same * 100 >= x.size * 95
+    }
 
     companion object {
         private const val TAG = "Summarizer"
@@ -25,16 +100,14 @@ class Summarizer(private val context: Context) {
 
     fun summarize(
         meeting: Meeting,
-        modelFile: File?,
         language: String,
-        useGpu: Boolean,
         onProgress: (Float) -> Unit,
     ): Summary {
         val transcript = meeting.utterances.joinToString("\n") { "${meeting.speakerName(it.speaker)}: ${it.text}" }
         if (transcript.isBlank()) return Summary(overview = emptyText(language), engine = "extractive", language = language)
         if (modelFile != null && modelFile.exists()) {
             try {
-                return llmSummary(meeting, transcript, modelFile, language, useGpu, onProgress)
+                return llmSummary(meeting, transcript, language, onProgress)
             } catch (t: Throwable) {
                 Log.w(TAG, "AI summary failed, using key sentences", t)
             }
@@ -83,15 +156,15 @@ class Summarizer(private val context: Context) {
     private fun langName(lang: String) = if (lang == "af") "Afrikaans" else "English"
 
     private fun llmSummary(
-        meeting: Meeting, transcript: String, modelFile: File, language: String, useGpu: Boolean,
+        meeting: Meeting, transcript: String, language: String,
         onProgress: (Float) -> Unit,
     ): Summary {
         val lang = langName(language)
         val system = "You are a professional meeting secretary in South Africa. You write clear, factual, " +
             "well-structured meeting minutes in $lang. Never invent facts that are not in the transcript. " +
             "Keep speaker names exactly as given."
-        val engine = openEngine(modelFile, useGpu)
-        try {
+        val engine = engine()
+        run {
             onProgress(0.05f)
             val chunks = chunk(transcript)
             val notes = if (chunks.size == 1) transcript else {
@@ -125,8 +198,6 @@ class Summarizer(private val context: Context) {
                 return extractive(meeting, language).copy(overview = final.take(1500), engine = "gemma")
             }
             return parsed
-        } finally {
-            runCatching { engine.close() }
         }
     }
 

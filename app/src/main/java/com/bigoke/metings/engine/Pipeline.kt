@@ -63,21 +63,39 @@ class Pipeline(
             if (!redoSummaryOnly) m = transcribeMeeting(m, settings.removeFillers, settings.threads, settings.beamSize)
             if (cancelled) throw InterruptedException("Stopped")
 
+            val llm = if (models.isReady(ModelKind.SUMMARY)) models.file(ModelKind.SUMMARY) else null
+            val summarizer = Summarizer(context, llm, settings.useGpuForSummary)
+            try {
+            // Readability: restore punctuation and capitals where the speech model left them out
+            if (!redoSummaryOnly && llm != null) {
+                report(id, "Adding punctuation", 0f, 0.80f, 0.86f)
+                val fixed = summarizer.punctuate(m.utterances.map { it.text }, m.language) { f ->
+                    report(id, "Adding punctuation", f, 0.80f, 0.86f)
+                }
+                m = m.copy(utterances = m.utterances.mapIndexed { i, u ->
+                    u.copy(text = TextCleaner.clean(fixed.getOrElse(i) { u.text }, m.language, false))
+                })
+                repo.save(m)
+            }
+            if (cancelled) throw InterruptedException("Stopped")
+
             // Details
-            report(id, "Finding details", 0.5f, 0.82f, 0.86f)
+            report(id, "Finding details", 0.5f, 0.86f, 0.88f)
             val names = m.speakers.associate { it.id to it.name }
             m = m.copy(entities = EntityExtractor(m.createdAt).extract(m.utterances, names))
             repo.save(m)
 
             // Summary
             val sumLang = if (settings.summaryLanguage == "same") m.language else settings.summaryLanguage
-            report(id, "Writing summary", 0f, 0.86f, 0.98f)
-            val llm = if (models.isReady(ModelKind.SUMMARY)) models.file(ModelKind.SUMMARY) else null
-            val summary = Summarizer(context).summarize(m, llm, sumLang, settings.useGpuForSummary) { f ->
-                report(id, "Writing summary", f, 0.86f, 0.98f)
+            report(id, "Writing summary", 0f, 0.88f, 0.98f)
+            val summary = summarizer.summarize(m, sumLang) { f ->
+                report(id, "Writing summary", f, 0.88f, 0.98f)
             }
             m = m.copy(summary = summary)
             repo.save(m)
+            } finally {
+                summarizer.close()
+            }
 
             // Keep the audio as a compact attachment
             if (m.audioFile.endsWith(".wav")) {
@@ -165,7 +183,8 @@ class Pipeline(
                     try { Thread.sleep(700) } catch (_: InterruptedException) { break }
                 }
             }.apply { isDaemon = true; start() }
-            val prompt = (basePrompt + " " + tail).takeLast(600)
+            val punctuatedTail = tail.takeIf { tl -> tl.count { it in ".?!," } >= 2 && tl.any { it.isUpperCase() } } ?: ""
+            val prompt = (basePrompt + " " + punctuatedTail).take(600)
             val got = try {
                 t.transcribe(buf, m0.language, threads, beam, prompt)
             } finally {
@@ -252,17 +271,25 @@ class Pipeline(
             if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text)
             sb.clear()
         }
+        var sincePunct = 0
         for (w in words) {
             val s = speakerAt((w.startMs + w.endMs) / 2, turns, if (spk < 0) 0 else spk)
+            // The model sometimes leaves out punctuation: use pauses in speech as sentence breaks.
+            if (sb.isNotEmpty() && s == spk && w.startMs - end > 650 && sincePunct >= 6 && sb.last() !in ".?!,;:…") {
+                sb.append('.')
+                sincePunct = 0
+            }
             val longPause = sb.isNotEmpty() && w.startMs - end > 3000
             val longPara = sb.length > 900 && sb.endsWith(".")
             if (s != spk || longPause || longPara) {
                 flush()
+                sincePunct = 0
                 spk = s; start = w.startMs
             }
             if (sb.isNotEmpty()) sb.append(' ')
             sb.append(w.text)
             end = w.endMs
+            if (w.text.last() in ".?!,;:…") sincePunct = 0 else sincePunct++
         }
         flush()
         // Merge tiny fragments (e.g. a single mis-assigned word) into the previous paragraph.
