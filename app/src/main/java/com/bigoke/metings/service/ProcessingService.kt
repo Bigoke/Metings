@@ -60,6 +60,10 @@ class ProcessingService : Service() {
         if (intent?.action == ACTION_CANCEL) {
             queue.clear()
             app.pipeline.cancel()
+            if (worker?.isActive != true) {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
             return START_NOT_STICKY
         }
         val id = intent?.getStringExtra(EXTRA_ID)

@@ -28,6 +28,14 @@ class Pipeline(
         private const val TAG = "Pipeline"
         private const val CHUNK_SECONDS = 300
         private const val GAP_SAMPLES = SAMPLE_RATE * 4 / 10
+        private const val BLOCK_MINUTES = 40
+
+        fun cosine(a: FloatArray, b: FloatArray): Float {
+            if (a.isEmpty() || a.size != b.size) return 0f
+            var dot = 0.0; var na = 0.0; var nb = 0.0
+            for (i in a.indices) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
+            return if (na == 0.0 || nb == 0.0) 0f else (dot / Math.sqrt(na * nb)).toFloat()
+        }
     }
 
     private val _progress = MutableStateFlow<Map<String, ProcessProgress>>(emptyMap())
@@ -131,21 +139,54 @@ class Pipeline(
         if (!wav.exists() || !wav.name.endsWith(".wav")) throw IllegalStateException("The original recording is no longer available for re-processing.")
 
         report(id, "Loading audio", 0.5f, 0f, 0.02f)
-        val samples = AudioFiles.readWavFloats(wav)
-        val durationMs = samples.size * 1000L / SAMPLE_RATE
+        val totalSamples = AudioFiles.wavSampleCount(wav)
+        val durationMs = totalSamples * 1000L / SAMPLE_RATE
 
-        // 1. Who spoke when
+        // 1. Who spoke when. Long meetings are handled in 40-minute blocks (to limit memory);
+        //    voices are matched across blocks by comparing voiceprints.
         report(id, "Recognising voices", 0f, 0.02f, 0.25f)
+        val block = BLOCK_MINUTES * 60 * SAMPLE_RATE
+        val nBlocks = ((totalSamples + block - 1) / block).coerceAtLeast(1)
         val diarizer = Diarizer(models.file(ModelKind.SEGMENT), models.file(ModelKind.VOICEPRINT), threads.coerceAtMost(4))
-        val turns = try {
-            diarizer.run(samples, m0.expectedSpeakers) { f -> report(id, "Recognising voices", f, 0.02f, 0.25f) }
+        val turns = ArrayList<SpeakerTurn>()
+        val globalPrints = ArrayList<FloatArray>()
+        try {
+            for (b in 0 until nBlocks) {
+                if (cancelled) throw InterruptedException("Stopped")
+                val startSample = b * block
+                val samples = AudioFiles.readWavFloats(wav, startSample, block)
+                val local = diarizer.run(samples, m0.expectedSpeakers) { f ->
+                    report(id, "Recognising voices", (b + f) / nBlocks, 0.02f, 0.25f)
+                }
+                val mapping = HashMap<Int, Int>()
+                if (nBlocks == 1) {
+                    local.map { it.speaker }.distinct().forEach { mapping[it] = it }
+                } else {
+                    val prints = diarizer.voiceprints(samples, local)
+                    for (spk in local.map { it.speaker }.distinct()) {
+                        val p = prints[spk]
+                        var best = -1; var bestSim = 0.5f
+                        if (p != null) globalPrints.forEachIndexed { gi, g ->
+                            val sim = cosine(p, g)
+                            if (sim > bestSim && gi !in mapping.values) { bestSim = sim; best = gi }
+                        }
+                        if (best < 0) {
+                            globalPrints += (p ?: FloatArray(0))
+                            best = globalPrints.size - 1
+                        }
+                        mapping[spk] = best
+                    }
+                }
+                val offsetMs = startSample * 1000L / SAMPLE_RATE
+                local.forEach { t -> turns += SpeakerTurn(t.startMs + offsetMs, t.endMs + offsetMs, mapping[t.speaker] ?: t.speaker) }
+            }
         } finally {
             diarizer.release()
         }
         if (cancelled) throw InterruptedException("Stopped")
 
         // 2. Speech regions (silence removed), grouped into chunks of up to 5 minutes
-        val regions = speechRegions(turns, samples.size)
+        val regions = speechRegions(turns, totalSamples)
         val chunks = ArrayList<List<Region>>()
         var cur = ArrayList<Region>(); var curLen = 0
         for (r in regions) {
@@ -170,7 +211,8 @@ class Pipeline(
             val buf = FloatArray(total)
             var pos = 0
             for (r in regs) {
-                System.arraycopy(samples, r.start, buf, pos, r.end - r.start)
+                val part = AudioFiles.readWavFloats(wav, r.start, r.end - r.start)
+                System.arraycopy(part, 0, buf, pos, part.size)
                 pieces += Piece(pos, r.start, r.end - r.start)
                 pos += (r.end - r.start) + GAP_SAMPLES
             }

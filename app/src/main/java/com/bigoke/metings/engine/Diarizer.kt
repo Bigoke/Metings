@@ -5,6 +5,7 @@ import com.k2fsa.sherpa.onnx.OfflineSpeakerDiarization
 import com.k2fsa.sherpa.onnx.OfflineSpeakerDiarizationConfig
 import com.k2fsa.sherpa.onnx.OfflineSpeakerSegmentationModelConfig
 import com.k2fsa.sherpa.onnx.OfflineSpeakerSegmentationPyannoteModelConfig
+import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractor
 import com.k2fsa.sherpa.onnx.SpeakerEmbeddingExtractorConfig
 import java.io.File
 
@@ -29,6 +30,30 @@ class Diarizer(segmentationModel: File, embeddingModel: File, threads: Int) {
     )
 
     private val sd = OfflineSpeakerDiarization(null, config)
+    private val embedder by lazy {
+        SpeakerEmbeddingExtractor(null, SpeakerEmbeddingExtractorConfig(model = embeddingModel.absolutePath, numThreads = threads))
+    }
+
+    /** One voiceprint per speaker in [turns] (times relative to [samples]), from up to ~20 s of their speech. */
+    fun voiceprints(samples: FloatArray, turns: List<SpeakerTurn>): Map<Int, FloatArray> {
+        val out = HashMap<Int, FloatArray>()
+        for ((spk, list) in turns.groupBy { it.speaker }) {
+            val stream = embedder.createStream()
+            var used = 0
+            for (t in list.sortedByDescending { it.endMs - it.startMs }) {
+                val s = (t.startMs * SAMPLE_RATE / 1000).toInt().coerceIn(0, samples.size)
+                val e = (t.endMs * SAMPLE_RATE / 1000).toInt().coerceIn(s, samples.size)
+                if (e - s < SAMPLE_RATE / 2) continue
+                stream.acceptWaveform(samples.copyOfRange(s, e), SAMPLE_RATE)
+                used += e - s
+                if (used > SAMPLE_RATE * 20) break
+            }
+            stream.inputFinished()
+            if (used > 0 && embedder.isReady(stream)) out[spk] = embedder.compute(stream)
+            stream.release()
+        }
+        return out
+    }
 
     /**
      * @param expectedSpeakers 0 = detect automatically.
@@ -59,5 +84,8 @@ class Diarizer(segmentationModel: File, embeddingModel: File, threads: Int) {
             .sortedBy { it.startMs }
     }
 
-    fun release() = sd.release()
+    fun release() {
+        sd.release()
+        runCatching { embedder.release() }
+    }
 }

@@ -75,6 +75,31 @@ object AudioFiles {
         return out
     }
 
+    fun wavSampleCount(file: File): Int = ((file.length() - 44).coerceAtLeast(0) / 2).toInt()
+
+    /** Reads [count] samples starting at sample [start] (random access, for long recordings). */
+    fun readWavFloats(file: File, start: Int, count: Int): FloatArray {
+        val total = wavSampleCount(file)
+        val s = start.coerceIn(0, total)
+        val n = count.coerceIn(0, total - s)
+        val out = FloatArray(n)
+        RandomAccessFile(file, "r").use { raf ->
+            raf.seek(44L + s * 2L)
+            val buf = ByteArray(1 shl 16)
+            var idx = 0
+            while (idx < n) {
+                val want = minOf(buf.size, (n - idx) * 2)
+                raf.readFully(buf, 0, want)
+                var i = 0
+                while (i + 1 < want) {
+                    out[idx++] = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xff)).toShort() / 32768f
+                    i += 2
+                }
+            }
+        }
+        return out
+    }
+
     fun wavDurationMs(file: File): Long = ((file.length() - 44).coerceAtLeast(0) / 2) * 1000L / SAMPLE_RATE
 
     /** Encodes the WAV to AAC in an .m4a container (64 kbps mono) to keep as the meeting attachment. */
