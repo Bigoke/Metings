@@ -73,10 +73,21 @@ class Diarizer(segmentationModel: File, embeddingModel: File, threads: Int) {
                 )
             )
         )
-        val segs = sd.processWithCallback(samples, callback = { done, total, _ ->
-            if (total > 0) onProgress(done.toFloat() / total)
-            0
-        })
+        // Note: processWithCallback is not used. Its native code looks up a callback method shape that
+        // Kotlin 2 no longer generates for lambdas, which crashes the process. Progress is estimated instead.
+        val started = System.currentTimeMillis()
+        val expectedMs = (samples.size * 1000L / SAMPLE_RATE / 15).coerceAtLeast(1500)
+        val ticker = Thread {
+            try {
+                while (true) {
+                    val f = (System.currentTimeMillis() - started).toFloat() / expectedMs
+                    onProgress((f / (1f + f)).coerceIn(0f, 0.95f))
+                    Thread.sleep(500)
+                }
+            } catch (_: InterruptedException) {}
+        }.apply { isDaemon = true; start() }
+        val segs = try { sd.process(samples) } finally { ticker.interrupt() }
+        onProgress(1f)
         // Re-number speakers in order of first appearance so the first voice is always Person 1.
         val order = LinkedHashMap<Int, Int>()
         segs.sortedBy { it.start }.forEach { s -> order.getOrPut(s.speaker) { order.size } }

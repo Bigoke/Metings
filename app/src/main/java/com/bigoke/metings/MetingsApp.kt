@@ -50,6 +50,15 @@ class MetingsApp : Application() {
         if (isEngine) return  // the processing process only needs the objects above
 
         val engineAlive = EngineGuard.engineRunning()
+        // A new version may fix what made earlier attempts fail: retry those meetings once.
+        val vp = getSharedPreferences("app", MODE_PRIVATE)
+        if (vp.getInt("version", 0) != BuildConfig.VERSION_CODE) {
+            vp.edit().putInt("version", BuildConfig.VERSION_CODE).apply()
+            repo.meetings.value.filter { it.status == MeetingStatus.FAILED }.forEach { m ->
+                EngineGuard.clear(m.id)
+                repo.update(m.id) { it.copy(status = MeetingStatus.QUEUED, error = null) }
+            }
+        }
         if (!engineAlive) {
             // If the app was closed while a step was running, count it (the next try uses safe mode).
             EngineGuard.recoverAfterCrash()

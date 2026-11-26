@@ -123,9 +123,32 @@ object EngineGuard {
     private fun recordExitReasons() = runCatching {
         if (Build.VERSION.SDK_INT < 30) return@runCatching
         val am = appContext.getSystemService(ActivityManager::class.java)
-        am.getHistoricalProcessExitReasons(appContext.packageName, 0, 3).forEach { e ->
-            log("exit: reason=${reasonName(e.reason)} importance=${e.importance} pss=${e.pss / 1024}MB rss=${e.rss / 1024}MB desc=${e.description}")
+        val seen = load().getProperty("loggedExits", "")
+        val logged = ArrayList<String>()
+        am.getHistoricalProcessExitReasons(appContext.packageName, 0, 5).forEach { e ->
+            val key = e.timestamp.toString()
+            logged += key
+            if (key in seen.split(',')) return@forEach
+            log("exit: ${e.processName} reason=${reasonName(e.reason)} importance=${e.importance} desc=${e.description}")
+            // Native crashes come with a tombstone; keep its readable text (abort message, backtrace).
+            if (e.reason == ApplicationExitInfo.REASON_CRASH_NATIVE) runCatching {
+                e.traceInputStream?.use { input ->
+                    val bytes = input.readBytes()
+                    val text = StringBuilder()
+                    val cur = StringBuilder()
+                    for (b in bytes) {
+                        val c = b.toInt() and 0xff
+                        if (c in 32..126) cur.append(c.toChar()) else {
+                            if (cur.length >= 6) text.append(cur).append('\n')
+                            cur.clear()
+                        }
+                        if (text.length > 6000) break
+                    }
+                    log("tombstone:\n$text")
+                }
+            }
         }
+        edit { it.setProperty("loggedExits", logged.joinToString(",")) }
     }
 
     private fun reasonName(r: Int) = when (r) {
