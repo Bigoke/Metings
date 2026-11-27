@@ -45,8 +45,10 @@ object SpeakerNamer {
         fun isName(first: String, needKnown: Boolean): Boolean {
             val f = Fuzzy.fold(first)
             if (f.length < 2 || f in Gazetteer.stopCapitalised) return false
+            // "Jan" is also short for January: a known first name wins.
+            if (f in known) return true
             if (Gazetteer.months[f] != null || Gazetteer.weekdays[f] != null || Gazetteer.places[f] != null) return false
-            return f in known || (!needKnown && first.first().isUpperCase())
+            return !needKnown && first.first().isUpperCase()
         }
 
         val us = m.utterances
