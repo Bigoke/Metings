@@ -262,6 +262,68 @@ class Summarizer(
         )
     }
 
+    // ------------------------------------------------------------------ Ask Notule
+
+    private fun ts(ms: Long): String { val s = ms / 1000; return "%d:%02d".format(s / 60, s % 60) }
+
+    /** Picks the parts of the transcript most related to the question (keeps the prompt small). */
+    private fun relevant(meeting: Meeting, question: String, maxChars: Int): List<Int> {
+        val q = words(question).toSet()
+        val all = meeting.utterances.indices.toList()
+        if (meeting.utterances.sumOf { it.text.length } <= maxChars) return all
+        val scored = all.map { i ->
+            val w = words(meeting.utterances[i].text)
+            i to w.count { it in q }.toDouble() / Math.sqrt(w.size.coerceAtLeast(1).toDouble())
+        }.sortedByDescending { it.second }
+        val picked = sortedSetOf<Int>()
+        var size = 0
+        for ((i, _) in scored) {
+            for (k in listOf(i - 1, i, i + 1)) {
+                if (k !in all || k in picked) continue
+                val len = meeting.utterances[k].text.length
+                if (size + len > maxChars) continue
+                picked += k; size += len
+            }
+            if (size > maxChars * 0.9) break
+        }
+        return picked.toList()
+    }
+
+    /** Answers a question about the meeting, citing moments as [m:ss]. */
+    fun ask(meeting: Meeting, question: String): Pair<String, String> {
+        val afWords = setOf("wat", "wie", "hoeveel", "wanneer", "waar", "hoekom", "watter", "het", "die", "ons", "sal", "gesê", "besluit")
+        val qWords = question.lowercase().split(Regex("""[^\p{L}']+"""))
+        val af = qWords.any { it in afWords } || (!Language.mostlyEnglish(question) && meeting.language == "af")
+        val idx = relevant(meeting, question, 9000)
+        if (modelFile != null && modelFile.exists()) {
+            runCatching {
+                val transcript = idx.joinToString("\n") { i ->
+                    val u = meeting.utterances[i]
+                    "[${ts(u.startMs)}] ${meeting.speakerName(u.speaker)}: ${u.text}"
+                }
+                val lang = if (af) "Afrikaans" else "English"
+                val answer = ask(
+                    engine(),
+                    "You answer questions about one meeting, using only its transcript. You are precise and brief.",
+                    "Answer in $lang. Use only the transcript below. After each fact, give the time it was said as [m:ss] " +
+                        "exactly as written in the transcript. If the transcript does not contain the answer, say so plainly.\n\n" +
+                        "QUESTION: $question\n\nTRANSCRIPT:\n$transcript",
+                )
+                if (answer.isNotBlank()) return answer to "gemma"
+            }.onFailure { Log.w(TAG, "Ask failed", it) }
+        }
+        // Without the AI: the best matching moments.
+        val q = words(question).toSet()
+        val best = meeting.utterances.withIndex()
+            .map { (i, u) -> i to words(u.text).count { it in q } }
+            .filter { it.second > 0 }.sortedByDescending { it.second }.take(3).sortedBy { it.first }
+        val text = if (best.isEmpty()) (if (af) "Ek kon niks daaroor in hierdie vergadering vind nie." else "I couldn't find anything about that in this meeting.")
+        else (if (af) "Hier is waar dit bespreek is:\n" else "Here is where it was discussed:\n") + best.joinToString("\n") { (i, _) ->
+            val u = meeting.utterances[i]; "• [${ts(u.startMs)}] ${meeting.speakerName(u.speaker)}: ${u.text.take(220)}"
+        }
+        return text to "search"
+    }
+
     // ------------------------------------------------------------------ key sentences fallback
 
     private val stop = setOf(

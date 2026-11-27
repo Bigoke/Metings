@@ -24,6 +24,7 @@ object EngineGuard {
     const val PUNCTUATE = "punctuate"
     const val SUMMARY = "summary"
     const val AUDIO = "audio"
+    const val ASK = "ask"
     const val MAX_CRASHES = 4
 
     private lateinit var appContext: Context

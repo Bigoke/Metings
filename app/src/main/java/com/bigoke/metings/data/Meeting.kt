@@ -79,6 +79,16 @@ data class Summary(
 )
 
 @Serializable
+data class QaItem(
+    val question: String,
+    val answer: String = "",
+    val askedAt: Long = System.currentTimeMillis(),
+    val pending: Boolean = true,
+    /** "gemma" or "search" (best matching moments when the AI is not installed). */
+    val engine: String = "",
+)
+
+@Serializable
 data class Meeting(
     val id: String,
     val title: String,
@@ -98,6 +108,8 @@ data class Meeting(
     val processingSeconds: Long = 0,
     val folder: String = "",
     val template: String = "general",
+    /** Questions asked about this meeting ("Ask Notule") and their answers. */
+    val qa: List<QaItem> = emptyList(),
 ) {
     fun speakerName(id: Int): String = speakers.firstOrNull { it.id == id }?.name ?: defaultSpeakerName(id, language)
     fun speaker(id: Int): Speaker = speakers.firstOrNull { it.id == id } ?: Speaker(id, defaultSpeakerName(id, language))

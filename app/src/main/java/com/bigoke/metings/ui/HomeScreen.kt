@@ -13,6 +13,24 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.animation.animateContentSize
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.outlined.CalendarToday
+import androidx.compose.material.icons.outlined.GraphicEq
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.FabPosition
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material3.SnackbarDuration
@@ -183,52 +201,36 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                         IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Outlined.Delete, tr("Delete", "Skrap"), tint = MaterialTheme.colorScheme.error) }
                     },
                 )
-            } else TopAppBar(
-                title = {
-                    Column {
-                        Text("Notule", style = MaterialTheme.typography.headlineSmall)
-                        Text(tr("Offline meeting minutes", "Vergaderings, vasgelê en opgesom"),
-                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onTasks) {
-                        Box {
-                            Icon(Icons.Outlined.TaskAlt, tr("Tasks", "Take"))
-                            if (openTasks > 0) Text(
-                                "$openTasks", style = MaterialTheme.typography.labelSmall, color = RecordRed,
-                                modifier = Modifier.align(Alignment.TopEnd).padding(start = 18.dp),
-                            )
-                        }
-                    }
-                    IconButton(onClick = onModels) { Icon(Icons.Outlined.CloudDownload, tr("Models", "Modelle")) }
-                    IconButton(onClick = onSettings) { Icon(Icons.Outlined.Settings, tr("Settings", "Instellings")) }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-            )
-        },
-        floatingActionButton = {
-            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                SmallFloatingActionButton(onClick = { importer.launch(arrayOf("audio/*", "video/*")) }) {
-                    Icon(Icons.Outlined.AudioFile, tr("Import audio", "Voer klank in"))
-                }
-                ExtendedFloatingActionButton(
-                    onClick = onRecord,
-                    containerColor = RecordRed,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                    icon = { Icon(Icons.Filled.Mic, null) },
-                    text = { Text(tr("Record", "Neem op")) },
-                )
             }
         },
+        floatingActionButton = {
+            if (selected.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(52.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface)
+                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
+                        .clickable { importer.launch(arrayOf("audio/*", "video/*")) },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Outlined.AudioFile, tr("Import audio", "Voer klank in"), tint = MaterialTheme.colorScheme.onSurface) }
+                Spacer(Modifier.width(18.dp))
+                RecordOrb(onClick = onRecord)
+                Spacer(Modifier.width(70.dp))
+            }
+        },
+        floatingActionButtonPosition = FabPosition.Center,
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
         LazyColumn(
-            Modifier.fillMaxSize().padding(pad),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 140.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            Modifier.fillMaxSize().padding(top = if (selected.isEmpty()) 0.dp else pad.calculateTopPadding()),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 150.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (selected.isEmpty()) item {
+                HomeHero(
+                    meetings = meetings, openTasks = openTasks, query = query, onQuery = { query = it },
+                    onTasks = onTasks, onModels = onModels, onSettings = onSettings,
+                )
+            }
             val folderOk = app.models.sharedAllowed()
             val steps = listOf(coreReady, folderOk, batteryOk)
             if (steps.any { !it }) {
@@ -263,16 +265,6 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
             }
             importError?.let { e ->
                 item { Text(e, color = MaterialTheme.colorScheme.error, modifier = Modifier.clickable { importError = null }) }
-            }
-            item {
-                OutlinedTextField(
-                    value = query, onValueChange = { query = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text(tr("Search meetings, people, words…", "Soek vergaderings, mense, woorde…")) },
-                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp),
-                )
             }
             if (folders.isNotEmpty()) {
                 item {
@@ -395,6 +387,22 @@ private fun MeetingCard(
                         Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
                         Spacer(Modifier.height(10.dp))
                     }
+                    if (m.utterances.isNotEmpty() && m.durationMs > 0) {
+                        val track = MaterialTheme.colorScheme.surfaceVariant
+                        androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(6.dp)) {
+                            val r = androidx.compose.ui.geometry.CornerRadius(size.height / 2)
+                            drawRoundRect(track, cornerRadius = r)
+                            m.utterances.forEach { u ->
+                                val x0 = size.width * u.startMs / m.durationMs
+                                val x1 = (size.width * u.endMs / m.durationMs).coerceAtLeast(x0 + 1.5f)
+                                drawRoundRect(
+                                    com.bigoke.metings.ui.theme.speakerColor(m.speaker(u.speaker).colorIndex),
+                                    androidx.compose.ui.geometry.Offset(x0, 0f), androidx.compose.ui.geometry.Size(x1 - x0, size.height), r,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Schedule, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         Spacer(Modifier.width(4.dp))
@@ -431,6 +439,79 @@ private fun MeetingCard(
                     Spacer(Modifier.width(6.dp))
                     Text(m.error ?: tr("Processing failed", "Verwerking het misluk"), color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall, maxLines = 3)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeHero(
+    meetings: List<Meeting>, openTasks: Int, query: String, onQuery: (String) -> Unit,
+    onTasks: () -> Unit, onModels: () -> Unit, onSettings: () -> Unit,
+) {
+    val weekAgo = System.currentTimeMillis() - 7L * 24 * 3600 * 1000
+    val thisWeek = meetings.count { it.createdAt >= weekAgo }
+    val hours = meetings.sumOf { it.durationMs } / 3_600_000.0
+    val hour = java.time.LocalTime.now().hour
+    val greeting = when {
+        hour < 12 -> tr("Good morning", "Goeiemôre")
+        hour < 18 -> tr("Good afternoon", "Goeiemiddag")
+        else -> tr("Good evening", "Goeienaand")
+    }
+    // Light status-bar icons on the dark hero while the home screen is shown.
+    val view = LocalView.current
+    val darkTheme = isSystemInDarkTheme()
+    DisposableEffect(Unit) {
+        val window = (view.context as? android.app.Activity)?.window
+        val ctl = window?.let { WindowCompat.getInsetsController(it, view) }
+        ctl?.isAppearanceLightStatusBars = false
+        onDispose { ctl?.isAppearanceLightStatusBars = !darkTheme }
+    }
+    // Full-bleed: extend past the list's side padding.
+    Box(Modifier.layout { measurable, constraints ->
+        val extra = 32.dp.roundToPx()
+        val w = constraints.maxWidth + extra
+        val p = measurable.measure(constraints.copy(minWidth = w, maxWidth = w))
+        layout(constraints.maxWidth, p.height) { p.place(-extra / 2, 0) }
+    }) {
+        HeroPanel {
+            Column(Modifier.statusBarsPadding().padding(start = 20.dp, end = 8.dp, top = 8.dp, bottom = 22.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(greeting, style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = 0.7f))
+                        Text("Notule", style = MaterialTheme.typography.headlineLarge, color = Color.White)
+                    }
+                    IconButton(onClick = onTasks) {
+                        BadgedBox(badge = { if (openTasks > 0) Badge { Text("$openTasks") } }) {
+                            Icon(Icons.Outlined.TaskAlt, tr("Tasks", "Take"), tint = Color.White)
+                        }
+                    }
+                    IconButton(onClick = onModels) { Icon(Icons.Outlined.CloudDownload, tr("Models", "Modelle"), tint = Color.White) }
+                    IconButton(onClick = onSettings) { Icon(Icons.Outlined.Settings, tr("Settings", "Instellings"), tint = Color.White) }
+                }
+                Spacer(Modifier.height(18.dp))
+                Row(Modifier.padding(end = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    HeroStat("$thisWeek", tr("this week", "hierdie week"), Icons.Outlined.CalendarToday, Modifier.weight(1f))
+                    HeroStat(if (hours < 10) "%.1f".format(hours) else "%.0f".format(hours), tr("hours recorded", "ure opgeneem"), Icons.Outlined.GraphicEq, Modifier.weight(1f))
+                    HeroStat("$openTasks", tr("open tasks", "oop take"), Icons.Outlined.TaskAlt, Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(16.dp))
+                Row(
+                    Modifier.padding(end = 12.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Color.White.copy(alpha = 0.12f))
+                        .padding(horizontal = 14.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Outlined.Search, null, tint = Color.White.copy(alpha = 0.8f))
+                    TextField(
+                        value = query, onValueChange = onQuery, singleLine = true, modifier = Modifier.weight(1f),
+                        placeholder = { Text(tr("Search meetings, people, words…", "Soek vergaderings, mense, woorde…"), color = Color.White.copy(alpha = 0.6f)) },
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
+                            focusedTextColor = Color.White, unfocusedTextColor = Color.White, cursorColor = Color.White,
+                        ),
+                    )
                 }
             }
         }

@@ -88,7 +88,14 @@ class MetingsApp : Application() {
                     val alive = EngineGuard.engineRunning()
                     pipeline.showExternal(if (alive) EngineGuard.readProgress() else null)
                     if (!alive) {
-                        val crashed = if (EngineGuard.current() != null) EngineGuard.recoverAfterCrash() else null
+                        var crashed = if (EngineGuard.current() != null) EngineGuard.recoverAfterCrash() else null
+                        // A crash while answering a question: mark the question, don't reprocess the meeting.
+                        if (crashed != null && EngineGuard.lastStage(crashed) == EngineGuard.ASK) {
+                            val cid = crashed
+                            EngineGuard.clear(cid)
+                            repo.update(cid) { mm -> mm.copy(qa = mm.qa.map { q -> if (q.pending) q.copy(pending = false, answer = "—", engine = "error") else q }) }
+                            crashed = null
+                        }
                         val stuck = repo.meetings.value.filter { it.status == MeetingStatus.PROCESSING }.map { it.id }
                         (stuck + listOfNotNull(crashed)).distinct().forEach { id ->
                             repo.update(id) { it.copy(status = MeetingStatus.QUEUED) }

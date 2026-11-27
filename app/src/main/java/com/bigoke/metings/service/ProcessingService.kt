@@ -31,6 +31,7 @@ class ProcessingService : Service() {
     companion object {
         private const val EXTRA_ID = "id"
         private const val EXTRA_SUMMARY_ONLY = "summaryOnly"
+        private const val EXTRA_ASK = "ask"
         private const val ACTION_CANCEL = "cancel"
         private const val NOTIF_ID = 22
 
@@ -40,12 +41,17 @@ class ProcessingService : Service() {
             )
         }
 
+        /** Ask Notule a question about a meeting; the answer is saved in the meeting. */
+        fun ask(ctx: Context, id: String, question: String) {
+            ctx.startForegroundService(Intent(ctx, ProcessingService::class.java).putExtra(EXTRA_ID, id).putExtra(EXTRA_ASK, question))
+        }
+
         fun cancel(ctx: Context) {
             ctx.startService(Intent(ctx, ProcessingService::class.java).setAction(ACTION_CANCEL))
         }
     }
 
-    private data class Job2(val id: String, val summaryOnly: Boolean)
+    private data class Job2(val id: String, val summaryOnly: Boolean, val ask: String? = null)
 
     private val queue = ConcurrentLinkedQueue<Job2>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -69,7 +75,9 @@ class ProcessingService : Service() {
         }
         val id = intent?.getStringExtra(EXTRA_ID)
         app.repo.reload()
-        if (id != null && queue.none { it.id == id }) queue.add(Job2(id, intent.getBooleanExtra(EXTRA_SUMMARY_ONLY, false)))
+        val question = intent?.getStringExtra(EXTRA_ASK)
+        if (id != null && question != null) queue.add(Job2(id, false, question))
+        else if (id != null && queue.none { it.id == id && it.ask == null }) queue.add(Job2(id, intent.getBooleanExtra(EXTRA_SUMMARY_ONLY, false)))
         // Also pick up anything else waiting (e.g. after a reboot).
         app.repo.meetings.value.filter { it.status == MeetingStatus.QUEUED && queue.none { q -> q.id == it.id } }
             .forEach { queue.add(Job2(it.id, false)) }
@@ -93,6 +101,10 @@ class ProcessingService : Service() {
                 app.repo.reload()  // the app process may have changed meetings since this process started
                 val m = app.repo.get(job.id) ?: continue
                 currentTitle = m.title
+                if (job.ask != null) {
+                    answer(app, m.id, job.ask)
+                    continue
+                }
                 app.pipeline.process(job.id, job.summaryOnly)
                 val done = app.repo.get(job.id)
                 if (done?.status == MeetingStatus.READY) notifyDone(done.id, done.title)
@@ -103,6 +115,29 @@ class ProcessingService : Service() {
             stopSelf()
             // End the engine process so the next job starts with fresh settings and free memory.
             android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ android.os.Process.killProcess(android.os.Process.myPid()) }, 800)
+        }
+    }
+
+    private fun answer(app: MetingsApp, id: String, question: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIF_ID, progressNotification(Ui.t("Thinking about your question…", "Dink oor jou vraag…"), 0.5f))
+        val s = app.prefs.settings.value
+        val llm = if (app.models.isReady(com.bigoke.metings.engine.ModelKind.SUMMARY)) app.models.file(com.bigoke.metings.engine.ModelKind.SUMMARY) else null
+        com.bigoke.metings.util.EngineGuard.begin(id, com.bigoke.metings.util.EngineGuard.ASK)
+        val summarizer = com.bigoke.metings.engine.Summarizer(this, llm, s.useGpuForSummary)
+        val (text, engine) = try {
+            val m = app.repo.get(id) ?: return
+            summarizer.ask(m, question)
+        } catch (t: Throwable) {
+            Ui.t("Sorry, I couldn't answer that right now.", "Jammer, ek kon dit nie nou beantwoord nie.") to "error"
+        } finally {
+            summarizer.close()
+            com.bigoke.metings.util.EngineGuard.end()
+        }
+        app.repo.update(id) { mm ->
+            val i = mm.qa.indexOfLast { it.pending && it.question == question }
+            if (i < 0) mm.copy(qa = mm.qa + com.bigoke.metings.data.QaItem(question, text, pending = false, engine = engine))
+            else mm.copy(qa = mm.qa.mapIndexed { k, q -> if (k == i) q.copy(answer = text, pending = false, engine = engine) else q })
         }
     }
 

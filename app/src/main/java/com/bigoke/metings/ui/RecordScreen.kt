@@ -34,6 +34,12 @@ import androidx.compose.material.icons.outlined.BookmarkAdd
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import com.bigoke.metings.ui.theme.BrandGradient
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.TextButton
@@ -126,11 +132,23 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
         if (wasActive && !rec.active && rec.meetingId != null) onFinished(rec.meetingId!!)
     }
 
+    val view = androidx.compose.ui.platform.LocalView.current
+    val darkTheme = androidx.compose.foundation.isSystemInDarkTheme()
+    androidx.compose.runtime.DisposableEffect(rec.active) {
+        val window = (view.context as? android.app.Activity)?.window
+        val ctl = window?.let { androidx.core.view.WindowCompat.getInsetsController(it, view) }
+        ctl?.isAppearanceLightStatusBars = !rec.active && !darkTheme
+        onDispose { ctl?.isAppearanceLightStatusBars = !darkTheme }
+    }
+    Box(Modifier.fillMaxSize().then(if (rec.active) Modifier.background(BrandGradient) else Modifier)) {
     Scaffold(
+        containerColor = if (rec.active) Color.Transparent else MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text(if (rec.active) tr("Recording", "Neem op") else tr("New meeting", "Nuwe vergadering")) },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("Back", "Terug")) } },
+                title = { Text(if (rec.active) "" else tr("New meeting", "Nuwe vergadering")) },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("Back", "Terug"),
+                    tint = if (rec.active) Color.White else MaterialTheme.colorScheme.onSurface) } },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
             )
         },
     ) { pad ->
@@ -216,55 +234,57 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
                     Spacer(Modifier.height(10.dp))
                     Text(tr("Microphone permission is needed to record.", "Mikrofoontoestemming is nodig om op te neem."), color = MaterialTheme.colorScheme.error)
                 }
-                Spacer(Modifier.height(32.dp))
-                FilledIconButton(
-                    onClick = { startRecording() },
-                    modifier = Modifier.size(96.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = RecordRed),
-                ) { Icon(Icons.Filled.Mic, tr("Start", "Begin"), Modifier.size(44.dp)) }
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(24.dp))
+                RecordOrb(onClick = { startRecording() }, size = 96.dp)
+                Spacer(Modifier.height(4.dp))
                 Text(tr("Tap to start", "Tik om te begin"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                Spacer(Modifier.height(32.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(10.dp).background(if (rec.paused) MaterialTheme.colorScheme.outline else RecordRed, CircleShape))
+                Spacer(Modifier.height(24.dp))
+                Row(
+                    Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.12f)).padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(9.dp).background(if (rec.paused) Color.White.copy(alpha = 0.5f) else RecordRed, CircleShape))
                     Spacer(Modifier.width(8.dp))
-                    Text(if (rec.paused) tr("PAUSED", "ONDERBREEK") else "REC", style = MaterialTheme.typography.labelLarge, letterSpacing = 2.sp)
+                    Text(if (rec.paused) tr("PAUSED", "ONDERBREEK") else tr("RECORDING", "OPNAME"), style = MaterialTheme.typography.labelLarge,
+                        letterSpacing = 2.sp, color = Color.White)
                 }
-                Spacer(Modifier.height(8.dp))
-                Text(formatDuration(rec.elapsedMs), style = MonoNumbers.copy(fontSize = 56.sp, fontWeight = FontWeight.Light))
-                Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(18.dp))
+                Text(formatDuration(rec.elapsedMs), style = MaterialTheme.typography.displaySmall.merge(MonoNumbers).copy(fontSize = 64.sp, fontWeight = FontWeight.Light), color = Color.White)
+                Text(title.ifBlank { tr("Meeting in progress", "Vergadering aan die gang") }, style = MaterialTheme.typography.titleMedium, color = Color.White.copy(alpha = 0.75f))
+                Spacer(Modifier.height(36.dp))
                 Waveform(rec.levels, rec.paused)
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(16.dp))
                 if (rec.bookmarks.isNotEmpty()) {
-                    Text("📌 " + rec.bookmarks.joinToString("  ") { formatDuration(it) },
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("📌 " + rec.bookmarks.joinToString("   ") { formatDuration(it) },
+                        style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.8f))
                 }
-                Spacer(Modifier.height(40.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-                    OutlinedIconButton(onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); RecordingService.bookmark(ctx) }, modifier = Modifier.size(60.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)) {
-                        Icon(Icons.Outlined.BookmarkAdd, tr("Bookmark", "Boekmerk"))
+                Spacer(Modifier.height(48.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(32.dp)) {
+                    RoundGlass(Icons.Outlined.BookmarkAdd, tr("Bookmark", "Boekmerk")) {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); RecordingService.bookmark(ctx)
                     }
-                    FilledIconButton(
-                        onClick = { confirmStop = true },
-                        modifier = Modifier.size(88.dp),
-                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = RecordRed),
-                    ) { Icon(Icons.Filled.Stop, tr("Stop", "Stop"), Modifier.size(40.dp)) }
-                    OutlinedIconButton(
-                        onClick = { if (rec.paused) RecordingService.resume(ctx) else RecordingService.pause(ctx) },
-                        modifier = Modifier.size(60.dp), border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    ) { Icon(if (rec.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause, tr("Pause", "Onderbreek")) }
+                    RecordOrb(onClick = { confirmStop = true }, size = 84.dp, icon = Icons.Filled.Stop, breathing = !rec.paused)
+                    RoundGlass(if (rec.paused) Icons.Filled.PlayArrow else Icons.Filled.Pause, tr("Pause", "Onderbreek")) {
+                        if (rec.paused) RecordingService.resume(ctx) else RecordingService.pause(ctx)
+                    }
                 }
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(66.dp)) {
+                    Text(tr("Mark", "Merk"), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                    Text(tr("Stop", "Stop"), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                    Text(if (rec.paused) tr("Resume", "Hervat") else tr("Pause", "Pouse"), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                }
+                Spacer(Modifier.height(28.dp))
                 Text(
-                    tr("Recording continues with the screen off. Stop when the meeting ends.",
-                        "Opname gaan voort met die skerm af. Stop wanneer die vergadering eindig."),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    tr("Recording continues with the screen off. Everything stays on this phone.",
+                        "Opname gaan voort met die skerm af. Alles bly op hierdie foon."),
+                    style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.65f),
                 )
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
     }
     if (confirmStop) {
         AlertDialog(
@@ -285,7 +305,7 @@ fun RecordScreen(autoStart: Boolean, onBack: () -> Unit, onFinished: (String) ->
 
 @Composable
 private fun Waveform(levels: List<Float>, paused: Boolean) {
-    val color = if (paused) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.secondary
+    val color = if (paused) Color.White.copy(alpha = 0.35f) else com.bigoke.metings.ui.theme.Mint
     Canvas(Modifier.fillMaxWidth().height(110.dp)) {
         val n = 60
         val data = levels.takeLast(n)
@@ -302,4 +322,13 @@ private fun Waveform(levels: List<Float>, paused: Boolean) {
             )
         }
     }
+}
+
+@Composable
+private fun RoundGlass(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Box(
+        Modifier.size(60.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.14f))
+            .border(1.dp, Color.White.copy(alpha = 0.2f), CircleShape).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Icon(icon, label, tint = Color.White) }
 }

@@ -69,7 +69,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarDuration
@@ -92,7 +92,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -241,17 +243,25 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
         },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    listOfNotNull(
-                        formatDate(m.createdAt), formatDuration(m.durationMs), m.folder.takeIf { it.isNotBlank() },
-                        Templates.get(m.template).takeIf { it.id != "general" }?.let { if (af) it.af else it.en },
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f), maxLines = 2,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy((-6).dp)) {
-                    m.speakers.take(6).forEach { SpeakerAvatar(it.name, it.colorIndex, 24.dp) }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+                FlowRow2 {
+                    MetaChip(formatDate(m.createdAt))
+                    MetaChip(formatDuration(m.durationMs))
+                    if (m.speakers.isNotEmpty()) MetaChip("${m.speakers.size} " + tr("people", "mense"))
+                    if (m.folder.isNotBlank()) MetaChip(m.folder)
+                    Templates.get(m.template).takeIf { it.id != "general" }?.let { MetaChip(if (af) it.af else it.en) }
+                }
+                if (m.utterances.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    val tlMarkers = remember(matches, m.bookmarksMs, m.entities) {
+                        matches.map { TimelineMarker(m.utterances[it].startMs, Color(0xFFF4B740)) } +
+                            m.bookmarksMs.map { TimelineMarker(it, Color(0xFF3DD9C1)) } +
+                            m.entities.filter { it.type == EntityType.TASK }.mapNotNull { e -> m.utterances.getOrNull(e.utterance)?.let { TimelineMarker(it.startMs, Color(0xFFE5484D)) } }
+                    }
+                    SpeakerTimeline(
+                        m, if (player.duration > 0) player.duration else m.durationMs, player.position, tlMarkers,
+                        onSeek = { ms -> player.seekTo(ms, play = player.playing) },
+                    )
                 }
             }
             when (m.status) {
@@ -271,9 +281,15 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                 MeetingStatus.READY -> {}
             }
             if (m.utterances.isNotEmpty() || m.status == MeetingStatus.READY) {
-                val tabs = listOf(tr("Summary", "Opsomming"), tr("Transcript", "Transkripsie"), tr("Details", "Besonderhede"), tr("People", "Mense"))
-                PrimaryTabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background) {
-                    tabs.forEachIndexed { i, t -> Tab(selected = tab == i, onClick = { tab = i }, text = { Text(t, maxLines = 1) }) }
+                val tabs = listOf(tr("Summary", "Opsomming"), tr("Transcript", "Transkripsie"), tr("Ask", "Vra"), tr("Details", "Besonderhede"), tr("People", "Mense"))
+                PrimaryScrollableTabRow(selectedTabIndex = tab, containerColor = MaterialTheme.colorScheme.background, edgePadding = 12.dp) {
+                    tabs.forEachIndexed { i, t ->
+                        Tab(selected = tab == i, onClick = { tab = i }, text = {
+                            if (i == 2) Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(16.dp)); Spacer(Modifier.width(4.dp)); Text(t, maxLines = 1)
+                            } else Text(t, maxLines = 1)
+                        })
+                    }
                 }
                 when (tab) {
                     0 -> SummaryTab(m, onModels, onToggle = { idx ->
@@ -283,8 +299,12 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                         m, player, settings.markUnsure, query.takeIf { searching && it.length >= 2 },
                         matches.getOrNull(hit), onEntity = { sheetEntity = it }, onEdit = { editing = it },
                     )
-                    2 -> DetailsTab(m, af, onEntity = { sheetEntity = it })
-                    3 -> PeopleTab(m, onRename = { sid, name, rememberVoice ->
+                    2 -> AskTab(m, player) { q ->
+                        save { mm -> mm.copy(qa = mm.qa + com.bigoke.metings.data.QaItem(q)) }
+                        ProcessingService.ask(ctx, id, q)
+                    }
+                    3 -> DetailsTab(m, af, onEntity = { sheetEntity = it })
+                    4 -> PeopleTab(m, onRename = { sid, name, rememberVoice ->
                         val sp = m.speaker(sid)
                         if (rememberVoice) scope.launch(Dispatchers.Default) { app.voices.remember(name, sp.voiceprint) }
                         save { mm ->
@@ -486,8 +506,9 @@ fun FlowRow2(content: @Composable () -> Unit) {
 
 @Composable
 private fun ProcessingCard(m: Meeting, stage: String?, overall: Float?, coreReady: Boolean, onModels: () -> Unit, onStop: () -> Unit) {
-    Card(Modifier.fillMaxWidth().padding(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-        Column(Modifier.padding(16.dp)) {
+    Card(Modifier.fillMaxWidth().padding(16.dp), shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface), elevation = CardDefaults.cardElevation(2.dp)) {
+        Column(Modifier.padding(20.dp)) {
             if (!coreReady && m.status == MeetingStatus.QUEUED) {
                 Text(tr("Waiting for the offline models", "Wag vir die vanlyn-modelle"), style = MaterialTheme.typography.titleSmall)
                 Text(tr("Your recording is saved. Download the models and it will be processed automatically.",
@@ -495,11 +516,11 @@ private fun ProcessingCard(m: Meeting, stage: String?, overall: Float?, coreRead
                 Spacer(Modifier.height(8.dp))
                 Button(onClick = onModels) { Text(tr("Download models", "Laai modelle af")) }
             } else {
-                Text(stage?.let { stageText(it) + "…" } ?: tr("Waiting to start…", "Wag om te begin…"), style = MaterialTheme.typography.titleSmall)
+                Text(if (stage == null) tr("Waiting to start…", "Wag om te begin…") else tr("Creating your minutes", "Jou notule word geskep"),
+                    style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(12.dp))
+                ProcessingStages(stage, overall)
                 Spacer(Modifier.height(8.dp))
-                if (overall != null) LinearProgressIndicator(progress = { overall }, modifier = Modifier.fillMaxWidth())
-                else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         tr("Everything runs on your phone. You can leave the app — you'll get a notification when it's ready.",
@@ -603,6 +624,14 @@ private fun SummaryTab(m: Meeting, onModels: () -> Unit, onToggle: (Int) -> Unit
         if (s == null) {
             item { Text(tr("The summary is still being prepared.", "Die opsomming word nog gemaak."), color = MaterialTheme.colorScheme.onSurfaceVariant) }
             return@LazyColumn
+        }
+        item {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                GlanceTile(formatDuration(m.durationMs), tr("duration", "duur"), Modifier.weight(1f))
+                GlanceTile("${m.speakers.size}", tr("people", "mense"), Modifier.weight(1f))
+                GlanceTile("${s.decisions.size}", tr("decisions", "besluite"), Modifier.weight(1f))
+                GlanceTile("${s.actions.count { !it.done }}", tr("open tasks", "oop take"), Modifier.weight(1f))
+            }
         }
         item {
             SummaryCard(tr("Overview", "Oorsig")) {
@@ -910,6 +939,25 @@ private fun PeopleTab(m: Meeting, onRename: (Int, String, Boolean) -> Unit, onMe
     }
     val totalTalk = talk.values.sumOf { it.first }.coerceAtLeast(1)
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (m.speakers.size > 1) item {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                TalkRing(
+                    m.speakers.map { speakerColor(it.colorIndex) to (talk[it.id]?.first ?: 0L).toFloat() },
+                    "${m.speakers.size}", tr("speakers", "sprekers"),
+                )
+                Spacer(Modifier.width(20.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    m.speakers.sortedByDescending { talk[it.id]?.first ?: 0L }.forEach { sp ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).background(speakerColor(sp.colorIndex), CircleShape))
+                            Spacer(Modifier.width(8.dp))
+                            Text(sp.name, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f, fill = false), maxLines = 1)
+                            Text("  ${((talk[sp.id]?.first ?: 0L) * 100 / totalTalk)}%", style = MaterialTheme.typography.labelLarge.merge(MonoNumbers))
+                        }
+                    }
+                }
+            }
+        }
         item {
             Text(
                 tr("Voices are recognised automatically. Name a person once and Notule recognises their voice in future meetings.",
@@ -1047,6 +1095,138 @@ private fun EntitySheet(m: Meeting, e: Entity, af: Boolean, player: AudioPlayer,
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
+        }
+    }
+}
+
+
+@Composable
+private fun MetaChip(text: String) {
+    Box(
+        Modifier.padding(vertical = 2.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(50))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+    ) { Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1) }
+}
+
+@Composable
+private fun GlanceTile(value: String, label: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier.background(MaterialTheme.colorScheme.surface, RoundedCornerShape(18.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(18.dp))
+            .padding(horizontal = 10.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(value, style = MaterialTheme.typography.titleMedium.merge(MonoNumbers), maxLines = 1)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+    }
+}
+
+// ---------------------------------------------------------------------------------------- Ask Notule
+
+private val timeRef = Regex("""\[(\d{1,3}):(\d{2})\]""")
+
+private fun answerText(text: String, link: Color, onSeek: (Long) -> Unit): AnnotatedString = buildAnnotatedString {
+    var pos = 0
+    for (mt in timeRef.findAll(text)) {
+        append(text.substring(pos, mt.range.first))
+        val ms = (mt.groupValues[1].toLong() * 60 + mt.groupValues[2].toLong()) * 1000
+        withLink(LinkAnnotation.Clickable("t$ms", TextLinkStyles(SpanStyle(color = link, fontWeight = FontWeight.SemiBold, background = link.copy(alpha = 0.12f)))) { onSeek(ms) }) {
+            append("▶ " + mt.groupValues[1] + ":" + mt.groupValues[2])
+        }
+        pos = mt.range.last + 1
+    }
+    append(text.substring(pos))
+}
+
+@Composable
+private fun AskTab(m: Meeting, player: AudioPlayer, onAsk: (String) -> Unit) {
+    var q by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    val busy = m.qa.any { it.pending }
+    LaunchedEffect(m.qa.size, busy) { if (m.qa.isNotEmpty()) listState.animateScrollToItem(m.qa.size) }
+    val suggestions = listOf(
+        tr("What was decided?", "Wat is besluit?"),
+        tr("Who has to do what, and by when?", "Wie moet wat doen, en teen wanneer?"),
+        tr("Which amounts and dates were mentioned?", "Watter bedrae en datums is genoem?"),
+        tr("What questions are still open?", "Watter vrae is nog oop?"),
+    )
+    val link = MaterialTheme.colorScheme.secondary
+    fun send(text: String) {
+        val t = text.trim()
+        if (t.isEmpty() || busy) return
+        onAsk(t); q = ""
+    }
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(state = listState, modifier = Modifier.weight(1f), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item {
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(com.bigoke.metings.ui.theme.AiGradient).padding(20.dp),
+                ) {
+                    Icon(Icons.Outlined.AutoAwesome, null, tint = Color.White)
+                    Spacer(Modifier.height(8.dp))
+                    Text(tr("Ask Notule", "Vra Notule"), style = MaterialTheme.typography.titleLarge, color = Color.White)
+                    Text(
+                        tr("Ask anything about this meeting. Answers come from the transcript, worked out on this phone. Tap a time to hear that moment.",
+                            "Vra enigiets oor hierdie vergadering. Antwoorde kom uit die transkripsie en word op hierdie foon uitgewerk. Tik 'n tyd om daardie oomblik te hoor."),
+                        style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.85f),
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    FlowRow2 {
+                        suggestions.forEach { sug ->
+                            Box(
+                                Modifier.padding(vertical = 3.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.18f))
+                                    .clickable(enabled = !busy) { send(sug) }.padding(horizontal = 12.dp, vertical = 7.dp),
+                            ) { Text(sug, color = Color.White, style = MaterialTheme.typography.labelMedium) }
+                        }
+                    }
+                }
+            }
+            m.qa.forEach { qa ->
+                item {
+                    Column(Modifier.fillMaxWidth()) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                            Text(
+                                qa.question, color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(start = 48.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(20.dp, 20.dp, 4.dp, 20.dp))
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.Top) {
+                            Box(Modifier.size(30.dp).clip(CircleShape).background(com.bigoke.metings.ui.theme.AiGradient), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Outlined.AutoAwesome, null, tint = Color.White, modifier = Modifier.size(16.dp))
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Box(
+                                Modifier.padding(end = 24.dp).background(MaterialTheme.colorScheme.surface, RoundedCornerShape(4.dp, 20.dp, 20.dp, 20.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(4.dp, 20.dp, 20.dp, 20.dp))
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                            ) {
+                                if (qa.pending) Row(verticalAlignment = Alignment.CenterVertically) {
+                                    ThinkingDots()
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(tr("Reading the meeting…", "Lees die vergadering…"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                } else Text(answerText(qa.answer, link) { ms -> player.seekTo(ms) }, style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Surface(tonalElevation = 2.dp) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = q, onValueChange = { q = it }, modifier = Modifier.weight(1f), maxLines = 3,
+                    placeholder = { Text(tr("Ask about this meeting…", "Vra oor hierdie vergadering…")) },
+                    shape = RoundedCornerShape(24.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).background(if (q.isBlank() || busy) SolidColor(MaterialTheme.colorScheme.surfaceVariant) else com.bigoke.metings.ui.theme.AiGradient)
+                        .clickable(enabled = q.isNotBlank() && !busy) { send(q) },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.AutoMirrored.Outlined.Send, tr("Ask", "Vra"), tint = if (q.isBlank() || busy) MaterialTheme.colorScheme.onSurfaceVariant else Color.White) }
             }
         }
     }
