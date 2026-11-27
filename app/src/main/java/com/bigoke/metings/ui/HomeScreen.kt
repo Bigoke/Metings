@@ -188,7 +188,7 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                         shadowElevation = 10.dp, tonalElevation = 2.dp,
                     ) {
                         Row(Modifier.padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            DockButton(Icons.Outlined.AudioFile, tr("Import", "Voer in")) (onImport)
+                            DockButton(Icons.Outlined.AudioFile, tr("Import", "Voer in"), onImport)
                             Spacer(Modifier.width(10.dp))
                             RecordOrb(onClick = onRecord, size = 64.dp)
                             Spacer(Modifier.width(10.dp))
