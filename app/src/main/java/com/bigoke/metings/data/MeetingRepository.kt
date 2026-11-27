@@ -39,6 +39,7 @@ class MeetingRepository(context: Context) {
 
     /** Re-reads only meetings whose file changed on disk (written by the engine process). */
     fun refreshChanged() {
+        if (preview) return
         val dirs = root.listFiles()?.filter { it.isDirectory } ?: return
         val ids = HashSet<String>()
         for (dir in dirs) {
@@ -57,7 +58,10 @@ class MeetingRepository(context: Context) {
     }
 
     /** For design previews / screenshot tests only: show meetings without saving them. */
+    @Volatile private var preview = false
+
     fun showForPreview(list: List<Meeting>) {
+        preview = true
         _meetings.value = list.sortedByDescending { it.createdAt }
     }
 

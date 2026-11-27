@@ -1,10 +1,8 @@
 package com.bigoke.metings.screens
 
 import android.graphics.Bitmap
-import androidx.compose.ui.graphics.asAndroidBitmap
-import androidx.compose.ui.test.captureToImage
-import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.onRoot
+import androidx.activity.ComponentActivity
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import com.bigoke.metings.MetingsApp
 import com.bigoke.metings.data.ActionItem
 import com.bigoke.metings.data.Entity
@@ -33,7 +31,7 @@ import java.io.File
 @Config(sdk = [35], qualifiers = "w411dp-h891dp-xxhdpi")
 class ScreenshotTest {
 
-    @get:Rule val rule = createComposeRule()
+    @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
 
     private val now = System.currentTimeMillis()
 
@@ -87,7 +85,10 @@ class ScreenshotTest {
         rule.mainClock.autoAdvance = false
         rule.setContent { MetingsTheme { content() } }
         rule.mainClock.advanceTimeBy(1500)
-        val bmp = rule.onRoot().captureToImage().asAndroidBitmap()
+        // Draw the window directly (does not wait for endless animations to stop).
+        val root = rule.activity.window.decorView
+        val bmp = Bitmap.createBitmap(root.width.coerceAtLeast(1), root.height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+        root.draw(android.graphics.Canvas(bmp))
         val dir = File("build/screens").apply { mkdirs() }
         File(dir, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }

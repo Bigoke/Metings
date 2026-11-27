@@ -73,7 +73,8 @@ class Pipeline(
 
     /** In the app process: show progress reported by the separate engine process. */
     fun showExternal(p: EngineGuard.Progress?) {
-        _progress.value = if (p == null) emptyMap() else mapOf(p.id to ProcessProgress(p.stage, p.fraction, p.overall))
+        val next = if (p == null) emptyMap() else mapOf(p.id to ProcessProgress(p.stage, p.fraction, p.overall))
+        if (next != _progress.value) _progress.value = next
     }
 
     private data class Region(val start: Int, val end: Int)
