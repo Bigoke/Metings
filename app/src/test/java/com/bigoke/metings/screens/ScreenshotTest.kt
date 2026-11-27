@@ -48,6 +48,7 @@ class ScreenshotTest {
         var t = 0L
         val utts = lines.map { (s, txt) -> Utterance(s, t, t + 42_000, txt, lang = "af").also { t += 47_000 } }
         val ready = Meeting(
+            namesChecked = true,
             id = "m1", title = "Kantoorbegroting Q1", createdAt = now - 2 * 3600_000, durationMs = t, language = "af",
             status = MeetingStatus.READY, speakers = speakers, utterances = utts, folder = "Bigoke", template = "board",
             entities = listOf(

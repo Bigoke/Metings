@@ -175,7 +175,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialT
     LaunchedEffect(m.id, m.status, m.namesChecked) {
         if (m.status == MeetingStatus.READY && !m.namesChecked && m.utterances.isNotEmpty()) {
             val known = app.voices.voices.value.map { it.name }
-            scope.launch(Dispatchers.Default) { app.repo.update(id) { mm -> reExtract(com.bigoke.metings.engine.SpeakerNamer.apply(mm, known).first) } }
+            scope.launch(Dispatchers.Default) { runCatching { app.repo.update(id) { mm -> reExtract(com.bigoke.metings.engine.SpeakerNamer.apply(mm, known).first) } } }
         }
     }
     val snackbar = remember { SnackbarHostState() }
