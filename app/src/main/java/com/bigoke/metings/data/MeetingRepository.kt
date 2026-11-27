@@ -56,6 +56,11 @@ class MeetingRepository(context: Context) {
         }
     }
 
+    /** For design previews / screenshot tests only: show meetings without saving them. */
+    fun showForPreview(list: List<Meeting>) {
+        _meetings.value = list.sortedByDescending { it.createdAt }
+    }
+
     fun newId(): String = UUID.randomUUID().toString().substring(0, 13)
 
     fun folder(id: String): File = File(root, id).apply { mkdirs() }

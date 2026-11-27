@@ -134,7 +134,7 @@ private fun reExtract(m: Meeting): Meeting = m.copy(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
+fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialTab: Int = 0) {
     val app = MetingsApp.instance
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -148,7 +148,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
         return
     }
     val player = rememberAudioPlayer(app.repo.audio(m))
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by remember { mutableIntStateOf(initialTab) }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var moving by remember { mutableStateOf(false) }
