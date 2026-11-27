@@ -83,8 +83,10 @@ class ScreenshotTest {
 
     private fun shot(name: String, content: @androidx.compose.runtime.Composable () -> Unit) {
         MetingsApp.instance.repo.showForPreview(sample())
+        // Endless animations (record halo, progress) never go idle: drive the clock by hand.
+        rule.mainClock.autoAdvance = false
         rule.setContent { MetingsTheme { content() } }
-        rule.waitForIdle()
+        rule.mainClock.advanceTimeBy(1500)
         val bmp = rule.onRoot().captureToImage().asAndroidBitmap()
         val dir = File("build/screens").apply { mkdirs() }
         File(dir, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
