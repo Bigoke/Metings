@@ -21,7 +21,8 @@ import androidx.compose.material.icons.outlined.CalendarToday
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.FabPosition
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.Surface
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.ui.draw.clip
@@ -203,20 +204,30 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                 )
             }
         },
-        floatingActionButton = {
-            if (selected.isEmpty()) Row(verticalAlignment = Alignment.CenterVertically) {
+        bottomBar = {
+            if (selected.isEmpty()) {
+                val bg = MaterialTheme.colorScheme.background
                 Box(
-                    Modifier.size(52.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface)
-                        .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
-                        .clickable { importer.launch(arrayOf("audio/*", "video/*")) },
+                    Modifier.fillMaxWidth()
+                        .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(bg.copy(alpha = 0f), bg.copy(alpha = 0.92f), bg)))
+                        .navigationBarsPadding().padding(top = 18.dp, bottom = 10.dp),
                     contentAlignment = Alignment.Center,
-                ) { Icon(Icons.Outlined.AudioFile, tr("Import audio", "Voer klank in"), tint = MaterialTheme.colorScheme.onSurface) }
-                Spacer(Modifier.width(18.dp))
-                RecordOrb(onClick = onRecord)
-                Spacer(Modifier.width(70.dp))
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(40.dp), color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 10.dp, tonalElevation = 2.dp,
+                    ) {
+                        Row(Modifier.padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DockButton(Icons.Outlined.AudioFile, tr("Import", "Voer in")) { importer.launch(arrayOf("audio/*", "video/*")) }
+                            Spacer(Modifier.width(10.dp))
+                            RecordOrb(onClick = onRecord, size = 64.dp)
+                            Spacer(Modifier.width(10.dp))
+                            DockButton(Icons.Outlined.TaskAlt, tr("Tasks", "Take"), onTasks)
+                        }
+                    }
+                }
             }
         },
-        floatingActionButtonPosition = FabPosition.Center,
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
     ) { pad ->
@@ -442,6 +453,17 @@ private fun MeetingCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DockButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Column(
+        Modifier.clip(RoundedCornerShape(20.dp)).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(icon, label, tint = MaterialTheme.colorScheme.onSurface)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
