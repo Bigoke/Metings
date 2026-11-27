@@ -93,7 +93,7 @@ class ScreenshotTest {
         File(dir, "$name.png").outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
-    @Test fun home() = shot("1-home") { HomeScreen({}, {}, {}, {}, {}) }
+    @Test fun home() = shot("1-home") { HomeScreen({}, {}, {}, {}, {}, {}) }
     @Test fun record() = shot("2-record") { RecordScreen(false, {}, {}, {}) }
     @Test fun summary() = shot("3-summary") { MeetingScreen("m1", {}, {}, initialTab = 0) }
     @Test fun transcript() = shot("4-transcript") { MeetingScreen("m1", {}, {}, initialTab = 1) }
