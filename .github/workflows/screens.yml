@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths: ["app/src/main/java/com/bigoke/metings/ui/**", "app/src/test/java/com/bigoke/metings/screens/**", ".github/workflows/screens.yml"]
 
+permissions:
+  contents: write
+
 jobs:
   screens:
     runs-on: ubuntu-latest
@@ -29,3 +32,12 @@ jobs:
           path: |
             app/build/screens/*.png
             app/build/reports/tests/
+      - name: Publish screenshots to the design-screens branch
+        if: always()
+        run: |
+          mkdir -p /tmp/shots && cp app/build/screens/*.png /tmp/shots/ || exit 0
+          cd /tmp/shots
+          git init -q -b design-screens
+          git config user.name "github-actions"; git config user.email "actions@github.com"
+          git add -A && git commit -q -m "Design screenshots ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" design-screens
