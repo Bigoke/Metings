@@ -29,7 +29,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Audiotrack
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Email
+import androidx.compose.material.icons.outlined.Notes
+import androidx.compose.material.icons.outlined.PictureAsPdf
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
@@ -146,6 +154,11 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
     var sheetEntity by remember { mutableStateOf<Entity?>(null) }
     var editing by remember { mutableStateOf<Int?>(null) }
     var searching by remember { mutableStateOf(false) }
+    var sharing by remember { mutableStateOf(false) }
+    var audioNext by remember { mutableStateOf(false) }
+    var askAudio by remember { mutableStateOf(false) }
+    // After the PDF was sent in a chat app, offer to send the audio as the second step.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { if (audioNext) { audioNext = false; askAudio = true } }
     var query by remember { mutableStateOf("") }
     var hit by remember { mutableIntStateOf(0) }
     val matches = remember(m.utterances, query) {
@@ -178,7 +191,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                         IconButton(onClick = { searching = false; query = "" }) { Icon(Icons.Outlined.Close, tr("Close search", "Maak soek toe")) }
                     } else {
                         if (m.utterances.isNotEmpty()) IconButton(onClick = { searching = true; tab = 1 }) { Icon(Icons.Outlined.Search, tr("Search", "Soek")) }
-                        if (m.status == MeetingStatus.READY) IconButton(onClick = { Exporter.share(ctx, m, includePdf = true, includeAudio = true) }) {
+                        if (m.status == MeetingStatus.READY) IconButton(onClick = { sharing = true }) {
                             Icon(Icons.Outlined.Share, tr("Share", "Deel"))
                         }
                         IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreVert, tr("More", "Meer")) }
@@ -192,11 +205,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
                             ProcessingService.enqueue(ctx, id)
                         })
                         if (m.status == MeetingStatus.READY) {
-                            DropdownMenuItem(text = { Text(tr("Share minutes (PDF) + audio", "Deel notule (PDF) + klank")) }, onClick = { menu = false; Exporter.share(ctx, m, true, true) })
-                            DropdownMenuItem(text = { Text(tr("Share minutes (PDF) only", "Deel slegs notule (PDF)")) }, onClick = { menu = false; Exporter.share(ctx, m, true, false) })
-                            DropdownMenuItem(text = { Text(tr("Share as Word document", "Deel as Word-dokument")) }, onClick = { menu = false; Exporter.shareWord(ctx, m) })
-                            DropdownMenuItem(text = { Text(tr("Share as text", "Deel as teks")) }, onClick = { menu = false; Exporter.shareText(ctx, m) })
-                            DropdownMenuItem(text = { Text(tr("Share audio only", "Deel slegs klank")) }, onClick = { menu = false; Exporter.share(ctx, m, false, true) })
+                            DropdownMenuItem(text = { Text(tr("Share / export…", "Deel / voer uit…")) }, onClick = { menu = false; sharing = true })
                             DropdownMenuItem(text = { Text(tr("Rewrite summary", "Herskryf opsomming")) }, onClick = { menu = false; ProcessingService.enqueue(ctx, id, summaryOnly = true) })
                         }
                         if (app.repo.audio(m).name.endsWith(".wav") && m.status != MeetingStatus.PROCESSING && m.status != MeetingStatus.NEW) {
@@ -407,6 +416,66 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit) {
         }
     }
     sheetEntity?.let { e -> EntitySheet(m, e, af, player, onDismiss = { sheetEntity = null }) }
+    val savedMsg = tr("Saved in ", "Gestoor in ")
+    val noAudioMsg = tr("This meeting has no audio file.", "Hierdie vergadering het geen klanklêer nie.")
+    if (sharing) ShareSheet(
+        onDismiss = { sharing = false },
+        onEmailBoth = { sharing = false; Exporter.emailBoth(ctx, m) },
+        onOneByOne = { sharing = false; audioNext = true; Exporter.sharePdf(ctx, m) },
+        onPdf = { sharing = false; Exporter.sharePdf(ctx, m) },
+        onAudio = { sharing = false; if (!Exporter.shareAudio(ctx, m)) scope.launch { snackbar.showSnackbar(noAudioMsg) } },
+        onWord = { sharing = false; Exporter.shareWord(ctx, m) },
+        onText = { sharing = false; Exporter.shareText(ctx, m) },
+        onSave = {
+            sharing = false
+            scope.launch {
+                val where = runCatching { kotlinx.coroutines.withContext(Dispatchers.IO) { Exporter.saveToDownloads(ctx, m) } }.getOrNull()
+                if (where != null) snackbar.showSnackbar(savedMsg + where, duration = SnackbarDuration.Long)
+            }
+        },
+    )
+    if (askAudio) AlertDialog(
+        onDismissRequest = { askAudio = false },
+        title = { Text(tr("Send the audio too?", "Stuur ook die klank?")) },
+        text = { Text(tr("The minutes were shared. Tap Send to share the audio recording to the same chat.",
+            "Die notule is gedeel. Tik Stuur om die klankopname na dieselfde klets te stuur.")) },
+        confirmButton = { TextButton(onClick = { askAudio = false; Exporter.shareAudio(ctx, m) }) { Text(tr("Send audio", "Stuur klank")) } },
+        dismissButton = { TextButton(onClick = { askAudio = false }) { Text(tr("Not now", "Nie nou nie")) } },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShareSheet(
+    onDismiss: () -> Unit, onEmailBoth: () -> Unit, onOneByOne: () -> Unit, onPdf: () -> Unit,
+    onAudio: () -> Unit, onWord: () -> Unit, onText: () -> Unit, onSave: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(tr("Share the minutes", "Deel die notule"), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp))
+            ShareRow(Icons.Outlined.Email, tr("E-mail minutes + audio", "E-pos notule + klank"), tr("Both files as attachments in one e-mail", "Albei lêers as aanhegsels in een e-pos"), onEmailBoth)
+            ShareRow(Icons.AutoMirrored.Outlined.Send, tr("WhatsApp / chat: minutes, then audio", "WhatsApp / klets: notule, dan klank"),
+                tr("Sends the PDF first, then offers the audio", "Stuur eers die PDF, dan bied dit die klank aan"), onOneByOne)
+            ShareRow(Icons.Outlined.Download, tr("Save minutes + audio to phone", "Stoor notule + klank op foon"), tr("In Download/Notule", "In Download/Notule"), onSave)
+            HorizontalDivider(Modifier.padding(vertical = 6.dp))
+            ShareRow(Icons.Outlined.PictureAsPdf, tr("Minutes (PDF) only", "Slegs notule (PDF)"), null, onPdf)
+            ShareRow(Icons.Outlined.Audiotrack, tr("Audio only", "Slegs klank"), null, onAudio)
+            ShareRow(Icons.Outlined.Description, tr("Word document", "Word-dokument"), null, onWord)
+            ShareRow(Icons.Outlined.Notes, tr("Text", "Teks"), null, onText)
+        }
+    }
+}
+
+@Composable
+private fun ShareRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String?, onClick: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(16.dp))
+        Column {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            if (subtitle != null) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)

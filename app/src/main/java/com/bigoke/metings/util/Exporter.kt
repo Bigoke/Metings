@@ -308,6 +308,71 @@ object Exporter {
         ctx.startActivity(chooser)
     }
 
+    private fun audioCopy(ctx: Context, m: Meeting): File? {
+        val audio = MetingsApp.instance.repo.audio(m)
+        if (!audio.exists()) return null
+        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
+        return File(dir, safeName(m) + " - " + Ui.t("audio", "klank") + "." + audio.extension).also { audio.copyTo(it, overwrite = true) }
+    }
+
+    /** PDF + audio in one e-mail (e-mail apps accept several attachments; chat apps often don't). */
+    fun emailBoth(ctx: Context, m: Meeting) {
+        val uris = arrayListOf(uri(ctx, pdf(ctx, m)))
+        audioCopy(ctx, m)?.let { uris += uri(ctx, it) }
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*")
+            .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            .putExtra(Intent.EXTRA_SUBJECT, (if (docAf(m)) "Notule: " else "Minutes: ") + m.title)
+            .putExtra(Intent.EXTRA_TEXT, m.summary?.overview ?: m.title)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val clip = android.content.ClipData.newUri(ctx.contentResolver, m.title, uris[0])
+        uris.drop(1).forEach { clip.addItem(android.content.ClipData.Item(it)) }
+        intent.clipData = clip
+        // Only e-mail apps
+        intent.selector = Intent(Intent.ACTION_SENDTO, Uri.parse("mailto:"))
+        runCatching { ctx.startActivity(intent) }.onFailure {
+            intent.selector = null
+            startShareIntent(ctx, intent, m.title, clip)
+        }
+    }
+
+    private fun startShareIntent(ctx: Context, intent: Intent, title: String, clip: android.content.ClipData) {
+        val chooser = Intent.createChooser(intent, title)
+        chooser.clipData = clip
+        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        ctx.startActivity(chooser)
+    }
+
+    fun sharePdf(ctx: Context, m: Meeting) = startShare(ctx, listOf(uri(ctx, pdf(ctx, m))), m.title, m.summary?.overview ?: m.title)
+
+    fun shareAudio(ctx: Context, m: Meeting): Boolean {
+        val f = audioCopy(ctx, m) ?: return false
+        startShare(ctx, listOf(uri(ctx, f)), m.title, m.title)
+        return true
+    }
+
+    /** Saves the PDF minutes and the audio in Download/Notule on the phone. Returns the folder shown to the user. */
+    fun saveToDownloads(ctx: Context, m: Meeting): String {
+        val folder = "Notule/" + safeName(m)
+        val files = buildList {
+            add(pdf(ctx, m) to "application/pdf")
+            audioCopy(ctx, m)?.let { add(it to (if (it.extension == "wav") "audio/wav" else "audio/mp4")) }
+        }
+        val resolver = ctx.contentResolver
+        for ((f, mime) in files) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, f.name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, mime)
+                put(android.provider.MediaStore.Downloads.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/" + folder)
+                put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val item = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: continue
+            resolver.openOutputStream(item)?.use { out -> f.inputStream().use { it.copyTo(out) } }
+            values.clear(); values.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(item, values, null, null)
+        }
+        return "Download/$folder"
+    }
+
     fun shareText(ctx: Context, m: Meeting) {
         val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, m.title).putExtra(Intent.EXTRA_TEXT, asText(m))
         ctx.startActivity(Intent.createChooser(i, m.title).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
