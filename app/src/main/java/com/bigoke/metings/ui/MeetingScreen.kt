@@ -91,6 +91,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -155,6 +158,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialT
     var confirmDelete by remember { mutableStateOf(false) }
     var sheetEntity by remember { mutableStateOf<Entity?>(null) }
     var editing by remember { mutableStateOf<Int?>(null) }
+    var editingWord by remember { mutableStateOf<Pair<Int, WordSpan>?>(null) }
     var searching by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
     var audioNext by remember { mutableStateOf(false) }
@@ -167,6 +171,13 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialT
         if (query.length < 2) emptyList() else m.utterances.indices.filter { m.utterances[it].text.contains(query, ignoreCase = true) }
     }
 
+    // Meetings transcribed before names were picked up from the conversation: do it once now.
+    LaunchedEffect(m.id, m.status, m.namesChecked) {
+        if (m.status == MeetingStatus.READY && !m.namesChecked && m.utterances.isNotEmpty()) {
+            val known = app.voices.voices.value.map { it.name }
+            save { mm -> com.bigoke.metings.engine.SpeakerNamer.apply(mm, known).first.let { reExtract(it) } }
+        }
+    }
     val snackbar = remember { SnackbarHostState() }
     val learnedMsg = tr("Learned: ", "Geleer: ")
     val fixAllLabel = tr("Fix everywhere", "Herstel oral")
@@ -298,6 +309,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialT
                     1 -> TranscriptTab(
                         m, player, settings.markUnsure, query.takeIf { searching && it.length >= 2 },
                         matches.getOrNull(hit), onEntity = { sheetEntity = it }, onEdit = { editing = it },
+                        onEditWord = { i, w -> editingWord = i to w },
                     )
                     2 -> AskTab(m, player) { q ->
                         save { mm -> mm.copy(qa = mm.qa + com.bigoke.metings.data.QaItem(q)) }
@@ -307,19 +319,7 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialT
                     4 -> PeopleTab(m, onRename = { sid, name, rememberVoice ->
                         val sp = m.speaker(sid)
                         if (rememberVoice) scope.launch(Dispatchers.Default) { app.voices.remember(name, sp.voiceprint) }
-                        save { mm ->
-                            val old = mm.speakerName(sid)
-                            val renamed = mm.copy(speakers = mm.speakers.map { if (it.id == sid) it.copy(name = name, recognised = false) else it })
-                            val sum = renamed.summary?.let { s ->
-                                fun r(x: String) = x.replace(old, name)
-                                s.copy(
-                                    overview = r(s.overview), decisions = s.decisions.map(::r), keyFigures = s.keyFigures.map(::r),
-                                    followUps = s.followUps.map(::r), extra = s.extra.map(::r),
-                                    actions = s.actions.map { a -> a.copy(text = r(a.text), owner = r(a.owner)) },
-                                )
-                            }
-                            reExtract(renamed.copy(summary = sum))
-                        }
+                        save { mm -> reExtract(com.bigoke.metings.engine.SpeakerNamer.rename(mm, sid, name)) }
                     }, onMerge = { from, into ->
                         save { mm ->
                             reExtract(mm.copy(
@@ -432,6 +432,67 @@ fun MeetingScreen(id: String, onBack: () -> Unit, onModels: () -> Unit, initialT
                     }) { Text(tr("Save", "Stoor")) }
                 },
                 dismissButton = { TextButton(onClick = { editing = null }) { Text(tr("Cancel", "Kanselleer")) } },
+            )
+        }
+    }
+    editingWord?.let { (idx, w) ->
+        val u = m.utterances.getOrNull(idx)
+        if (u != null && w.end <= u.text.length) {
+            val raw = u.text.substring(w.start, w.end)
+            val lead = raw.takeWhile { !it.isLetterOrDigit() }
+            val trail = raw.takeLastWhile { !it.isLetterOrDigit() }
+            val core = raw.removePrefix(lead).removeSuffix(trail).ifEmpty { raw }
+            var text by remember(idx, w) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(core, androidx.compose.ui.text.TextRange(0, core.length))) }
+            val coreRe = remember(core) { Regex("""(?<![\p{L}\d])""" + Regex.escape(core) + """(?![\p{L}\d])""", RegexOption.IGNORE_CASE) }
+            val elsewhere = remember(core, m.utterances) { m.utterances.withIndex().sumOf { (i, x) -> coreRe.findAll(x.text).count() - if (i == idx) 1 else 0 } }
+            var everywhere by remember(idx, w) { mutableStateOf(true) }
+            val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+            LaunchedEffect(Unit) { focus.requestFocus() }
+            AlertDialog(
+                onDismissRequest = { editingWord = null },
+                title = { Text(tr("Correct word", "Korrigeer woord")) },
+                text = {
+                    Column {
+                        TextButton(onClick = { player.seekTo(w.ms - 400, play = true) }, contentPadding = PaddingValues(0.dp)) {
+                            Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp))
+                            Text(tr("Listen", "Luister") + " · " + formatDuration(w.ms))
+                        }
+                        OutlinedTextField(text, { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth().focusRequester(focus))
+                        if (elsewhere > 0) Row(Modifier.clickable { everywhere = !everywhere }, verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = everywhere, onCheckedChange = { everywhere = it })
+                            Text(tr("Also fix the other $elsewhere in this meeting", "Herstel ook die ander $elsewhere in hierdie vergadering"), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text(
+                            tr("Notule remembers this and spells it correctly in future transcripts.",
+                                "Notule onthou dit en spel dit reg in toekomstige transkripsies."),
+                            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        TextButton(onClick = { editingWord = null; editing = idx }, contentPadding = PaddingValues(0.dp)) {
+                            Text(tr("Edit the whole paragraph or speaker…", "Wysig die hele paragraaf of spreker…"))
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        editingWord = null
+                        val new = text.text.trim()
+                        if (new.isEmpty() || new == core) return@TextButton
+                        val replacedHere = u.text.substring(0, w.start) + lead + new + trail + u.text.substring(w.end)
+                        val learned = com.bigoke.metings.data.CorrectionBook.diff(u.text, replacedHere).ifEmpty { listOf(core to new) }
+                        app.corrections.add(learned)
+                        save { mm ->
+                            reExtract(mm.copy(utterances = mm.utterances.mapIndexed { i, x ->
+                                when {
+                                    i == idx -> x.copy(text = if (everywhere) coreRe.replace(replacedHere) { new } else replacedHere, edited = true, unsure = x.unsure - core.lowercase())
+                                    everywhere && coreRe.containsMatchIn(x.text) -> x.copy(text = coreRe.replace(x.text) { new }, edited = true, unsure = x.unsure - core.lowercase())
+                                    else -> x
+                                }
+                            }))
+                        }
+                        scope.launch { snackbar.showSnackbar(learnedMsg + "$core → $new", withDismissAction = true) }
+                    }) { Text(tr("Save", "Stoor")) }
+                },
+                dismissButton = { TextButton(onClick = { editingWord = null }) { Text(tr("Cancel", "Kanselleer")) } },
             )
         }
     }
@@ -743,19 +804,61 @@ private fun Bullet(text: String) {
 
 // ---------------------------------------------------------------------------------------- transcript
 
+/** A word in an utterance's text with the moment it was spoken. */
+data class WordSpan(val start: Int, val end: Int, val ms: Long)
+
+private val wordRe = Regex("""\S+""")
+
+/** Word positions and times. Uses the speech model's word timings, spread over the (possibly edited) text. */
+fun wordSpans(u: com.bigoke.metings.data.Utterance): List<WordSpan> {
+    val found = wordRe.findAll(u.text).toList()
+    if (found.isEmpty()) return emptyList()
+    val n = found.size
+    val len = u.text.length.coerceAtLeast(1)
+    val dur = (u.endMs - u.startMs).coerceAtLeast(1)
+    return found.mapIndexed { i, mr ->
+        val ms = if (u.wordMs.isNotEmpty()) {
+            val raw = (i.toLong() * u.wordMs.size / n).toInt().coerceIn(0, u.wordMs.size - 1)
+            u.startMs + u.wordMs[raw]
+        } else u.startMs + dur * mr.range.first / len
+        WordSpan(mr.range.first, mr.range.last + 1, ms)
+    }
+}
+
 @Composable
 private fun TranscriptTab(
     m: Meeting, player: AudioPlayer, markUnsure: Boolean, query: String?, focus: Int?,
-    onEntity: (Entity) -> Unit, onEdit: (Int) -> Unit,
+    onEntity: (Entity) -> Unit, onEdit: (Int) -> Unit, onEditWord: (Int, WordSpan) -> Unit,
 ) {
     val byUtterance = remember(m.entities) { m.entities.filter { it.type != EntityType.TASK }.groupBy { it.utterance } }
     val taskUtterances = remember(m.entities) { m.entities.filter { it.type == EntityType.TASK }.map { it.utterance }.toSet() }
+    val spans = remember(m.utterances) { m.utterances.map { wordSpans(it) } }
     val listState = rememberLazyListState()
     val headerItems = if (m.bookmarksMs.isNotEmpty()) 1 else 0
     LaunchedEffect(focus) { if (focus != null) listState.animateScrollToItem(focus + headerItems) }
-    val current = m.utterances.indexOfLast { it.startMs <= player.position + 150 }.takeIf { player.playing || player.position > 0 } ?: -1
+    val started = player.playing || player.position > 0
+    val current = if (!started) -1 else m.utterances.indexOfLast { it.startMs <= player.position + 120 }
+    val activeWord = if (current < 0) -1 else spans[current].indexOfLast { it.ms <= player.position + 90 }
+    // Follow the audio: keep the paragraph being played on screen.
+    LaunchedEffect(current) {
+        if (player.playing && current >= 0 && !listState.isScrollInProgress) {
+            val item = current + headerItems
+            val visible = listState.layoutInfo.visibleItemsInfo
+            val shownFully = visible.any { it.index == item && it.offset >= 0 && it.offset + it.size <= listState.layoutInfo.viewportEndOffset }
+            if (!shownFully) listState.animateScrollToItem(item, -120)
+        }
+    }
     val hitBg = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.30f)
+    val wordBg = com.bigoke.metings.ui.theme.Teal
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     LazyColumn(state = listState, contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 24.dp)) {
+        item {
+            Text(
+                tr("Tap a word to play from there · hold a word to correct it", "Tik 'n woord om daarvandaan te speel · hou 'n woord om dit reg te maak"),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 8.dp, bottom = 4.dp),
+            )
+        }
         if (m.bookmarksMs.isNotEmpty()) item {
             FlowRow2 {
                 m.bookmarksMs.forEach { b ->
@@ -772,7 +875,7 @@ private fun TranscriptTab(
                     .background(
                         when {
                             idx == focus -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
-                            active -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                            active -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
                             else -> Color.Transparent
                         }, RoundedCornerShape(12.dp),
                     )
@@ -797,10 +900,31 @@ private fun TranscriptTab(
                     }
                 }
                 Spacer(Modifier.height(2.dp))
+                val ents = byUtterance[idx].orEmpty()
+                val ws = spans[idx]
+                val activeSpan = if (active) ws.getOrNull(activeWord) else null
+                var layout by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
                 Text(
-                    highlighted(u.text, byUtterance[idx].orEmpty(), if (markUnsure) u.unsure else emptyList(), query, hitBg, onEntity),
+                    highlighted(u.text, ents, if (markUnsure) u.unsure else emptyList(), query, hitBg, activeSpan, wordBg, ws, if (active) activeWord else -1),
                     style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.padding(start = 34.dp).clickable { player.seekTo(u.startMs) },
+                    onTextLayout = { layout = it },
+                    modifier = Modifier.padding(start = 34.dp).pointerInput(u.text, ents) {
+                        fun wordAt(pos: androidx.compose.ui.geometry.Offset): Pair<Int, WordSpan?> {
+                            val off = layout?.getOffsetForPosition(pos) ?: return -1 to null
+                            return off to (ws.firstOrNull { off >= it.start && off < it.end } ?: ws.lastOrNull { it.start <= off })
+                        }
+                        detectTapGestures(
+                            onTap = { pos ->
+                                val (off, w) = wordAt(pos)
+                                val e = ents.firstOrNull { off >= it.start && off < it.end }
+                                if (e != null) onEntity(e) else player.seekTo((w?.ms ?: u.startMs) - 150, play = true)
+                            },
+                            onLongPress = { pos ->
+                                val (_, w) = wordAt(pos)
+                                if (w != null) { haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); onEditWord(idx, w) }
+                            },
+                        )
+                    },
                 )
             }
         }
@@ -808,20 +932,20 @@ private fun TranscriptTab(
 }
 
 private fun highlighted(
-    text: String, entities: List<Entity>, unsure: List<String>, query: String?, hitBg: Color, onEntity: (Entity) -> Unit,
+    text: String, entities: List<Entity>, unsure: List<String>, query: String?, hitBg: Color,
+    activeSpan: WordSpan?, wordBg: Color, spans: List<WordSpan>, activeIndex: Int,
 ): AnnotatedString = buildAnnotatedString {
-    var pos = 0
-    for (e in entities.sortedBy { it.start }) {
-        if (e.start < pos || e.end > text.length) continue
-        append(text.substring(pos, e.start))
-        val c = entityColor(e.type)
-        val style = SpanStyle(color = c, fontWeight = FontWeight.SemiBold, background = c.copy(alpha = 0.10f))
-        withLink(LinkAnnotation.Clickable(tag = "${e.type}:${e.start}", styles = TextLinkStyles(style = style)) { onEntity(e) }) {
-            append(text.substring(e.start, e.end))
-        }
-        pos = e.end
+    append(text)
+    // Words already played in the current paragraph are slightly faded so the eye follows the audio.
+    if (activeIndex > 0) {
+        val until = spans[activeIndex].start
+        addStyle(SpanStyle(color = Color(0xFF8A94A6)), 0, until)
     }
-    if (pos < text.length) append(text.substring(pos))
+    for (e in entities) {
+        if (e.start < 0 || e.end > text.length || e.start >= e.end) continue
+        val c = entityColor(e.type)
+        addStyle(SpanStyle(color = c, fontWeight = FontWeight.SemiBold, background = c.copy(alpha = 0.10f)), e.start, e.end)
+    }
     // Words the speech model was unsure about: underlined in amber so they can be checked against the audio.
     if (unsure.isNotEmpty()) {
         val lower = text.lowercase()
@@ -847,6 +971,9 @@ private fun highlighted(
             addStyle(SpanStyle(background = hitBg, fontWeight = FontWeight.Bold), i, i + q.length)
             from = i + q.length
         }
+    }
+    if (activeSpan != null && activeSpan.end <= text.length) {
+        addStyle(SpanStyle(background = wordBg, color = Color.White, fontWeight = FontWeight.SemiBold), activeSpan.start, activeSpan.end)
     }
 }
 
@@ -934,6 +1061,13 @@ private fun parseColor(hex: String): Color = runCatching { Color(android.graphic
 private fun PeopleTab(m: Meeting, onRename: (Int, String, Boolean) -> Unit, onMerge: (Int, Int) -> Unit) {
     var renameId by remember { mutableStateOf<Int?>(null) }
     var mergeId by remember { mutableStateOf<Int?>(null) }
+    var assignName by remember { mutableStateOf<String?>(null) }
+    val peopleOthers = remember(m.addressed, m.entities, m.speakers) {
+        val speaking = m.speakers.map { it.name.split(' ')[0].lowercase() }.toSet()
+        (m.addressed + m.entities.filter { it.type == EntityType.PERSON }.map { it.text })
+            .map { it.trim() }.filter { it.length > 1 && it.split(' ')[0].lowercase() !in speaking }
+            .distinctBy { it.lowercase() }.take(12)
+    }
     val talk = remember(m.utterances) {
         m.utterances.groupBy { it.speaker }.mapValues { (_, us) -> us.sumOf { (it.endMs - it.startMs).coerceAtLeast(0) } to us.sumOf { it.text.split(' ').size } }
     }
@@ -979,6 +1113,11 @@ private fun PeopleTab(m: Meeting, onRename: (Int, String, Boolean) -> Unit, onMe
                                     "${formatDuration(ms)} · ${(ms * 100 / totalTalk)}% · $words " + tr("words", "woorde"),
                                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                                if (s.nameSource == "said") Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Outlined.AutoAwesome, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.secondary)
+                                    Text(" " + tr("Named from the conversation", "Naam uit die gesprek gehaal"),
+                                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.secondary)
+                                }
                                 if (s.recognised) Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(Icons.Outlined.RecordVoiceOver, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.secondary)
                                     Text(" " + tr("Recognised from earlier meetings", "Herken uit vorige vergaderings"),
@@ -989,13 +1128,52 @@ private fun PeopleTab(m: Meeting, onRename: (Int, String, Boolean) -> Unit, onMe
                         Spacer(Modifier.height(10.dp))
                         LinearProgressIndicator(progress = { ms.toFloat() / totalTalk }, color = speakerColor(s.colorIndex), modifier = Modifier.fillMaxWidth())
                         Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { renameId = s.id }) { Text(if (s.recognised) tr("Not them? Rename", "Nie hulle nie? Hernoem") else tr("Rename", "Hernoem")) }
+                            TextButton(onClick = { renameId = s.id }) { Text(if (s.recognised || s.nameSource == "said") tr("Not them? Rename", "Nie hulle nie? Hernoem") else tr("Rename", "Hernoem")) }
                             if (m.speakers.size > 1) OutlinedButton(onClick = { mergeId = s.id }) { Text(tr("Merge", "Voeg saam")) }
                         }
                     }
                 }
             }
         }
+        if (peopleOthers.isNotEmpty()) item {
+            Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(tr("Also in the conversation", "Ook in die gesprek"), style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        tr("Spoken to or about, but not heard as a separate voice. Tap a name to give it to a speaker.",
+                            "Mee gepraat of oor gepraat, maar nie as aparte stem gehoor nie. Tik 'n naam om dit aan 'n spreker te gee."),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow2 {
+                        peopleOthers.forEach { n ->
+                            AssistChip(onClick = { assignName = n }, label = { Text(n) },
+                                leadingIcon = { SpeakerAvatar(n, 7, 20.dp) })
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assignName?.let { n ->
+        AlertDialog(
+            onDismissRequest = { assignName = null },
+            title = { Text(tr("Who is $n?", "Wie is $n?")) },
+            text = {
+                Column {
+                    m.speakers.forEach { s ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable { assignName = null; onRename(s.id, n, s.voiceprint.isNotEmpty()) }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SpeakerAvatar(s.name, s.colorIndex, 28.dp); Spacer(Modifier.width(10.dp)); Text(s.name)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { assignName = null }) { Text(tr("Not a speaker", "Nie 'n spreker nie")) } },
+        )
     }
     renameId?.let { sid ->
         var text by remember(sid) { mutableStateOf(m.speakerName(sid).let { if (com.bigoke.metings.data.isDefaultSpeakerName(it)) "" else it }) }
@@ -1007,6 +1185,11 @@ private fun PeopleTab(m: Meeting, onRename: (Int, String, Boolean) -> Unit, onMe
             text = {
                 Column {
                     OutlinedTextField(text, { text = it }, singleLine = true, placeholder = { Text(tr("Name", "Naam")) })
+                    if (peopleOthers.isNotEmpty()) {
+                        Text(tr("Named in this meeting", "Genoem in hierdie vergadering"), style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+                        FlowRow2 { peopleOthers.take(8).forEach { n -> AssistChip(onClick = { text = n }, label = { Text(n) }) } }
+                    }
                     if (hasPrint) Row(Modifier.clickable { rememberVoice = !rememberVoice }, verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = rememberVoice, onCheckedChange = { rememberVoice = it })
                         Text(tr("Recognise this voice in future meetings", "Herken hierdie stem in toekomstige vergaderings"), style = MaterialTheme.typography.bodySmall)

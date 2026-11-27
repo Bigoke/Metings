@@ -78,7 +78,7 @@ fun rememberAudioPlayer(file: File): AudioPlayer {
     LaunchedEffect(player, player.playing) {
         while (player.playing) {
             player.tick()
-            delay(200)
+            delay(50)
         }
     }
     return player

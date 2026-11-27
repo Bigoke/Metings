@@ -2,4 +2,7 @@
     <string name="app_name">Notule</string>
     <string name="widget_record">Record meeting</string>
     <string name="tile_label">Record meeting</string>
+    <string name="share_label">Transcribe with Notule</string>
+    <string name="shortcut_import">Import audio</string>
+    <string name="shortcut_record">Record meeting</string>
 </resources>

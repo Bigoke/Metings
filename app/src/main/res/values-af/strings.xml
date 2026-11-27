@@ -1,4 +1,7 @@
 <resources>
     <string name="widget_record">Neem vergadering op</string>
     <string name="tile_label">Neem vergadering op</string>
+    <string name="share_label">Transkribeer met Notule</string>
+    <string name="shortcut_import">Voer klank in</string>
+    <string name="shortcut_record">Neem vergadering op</string>
 </resources>

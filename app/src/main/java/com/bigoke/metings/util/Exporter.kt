@@ -1,6 +1,8 @@
 package com.bigoke.metings.util
 
 import android.content.Context
+import androidx.compose.ui.graphics.toArgb
+import com.bigoke.metings.ui.theme.speakerColor
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -113,13 +115,13 @@ object Exporter {
             c.drawText(p, w - margin - small.measureText(p), h - 24f, small)
         }
 
-        fun layout(text: String, paint: TextPaint, width: Float): StaticLayout =
+        fun layout(text: CharSequence, paint: TextPaint, width: Float): StaticLayout =
             StaticLayout.Builder.obtain(text, 0, text.length, paint, width.toInt().coerceAtLeast(10))
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL).setLineSpacing(1.5f, 1f).build()
 
         fun ensure(height: Float) { if (y + height > h - margin - 20) newPage() }
 
-        fun text(t: String, paint: TextPaint = body, indent: Float = 0f, after: Float = 5f) {
+        fun text(t: CharSequence, paint: TextPaint = body, indent: Float = 0f, after: Float = 5f) {
             val l = layout(t, paint, width - indent)
             var i = 0
             while (i < l.lineCount) {
@@ -219,6 +221,8 @@ object Exporter {
             if (tpl.id != "general") add(listOf(if (af) "Soort" else "Type", if (af) tpl.af else tpl.en))
             add(listOf(if (af) "Teenwoordig" else "Present", m.speakers.joinToString(", ") { it.name }))
             if (settings.preparedBy.isNotBlank()) add(listOf(if (af) "Opgestel deur" else "Prepared by", settings.preparedBy))
+            if (includeTranscript && m.utterances.isNotEmpty()) add(listOf(if (af) "Transkripsie" else "Transcript",
+                if (af) "Volledige transkripsie aan die einde aangeheg" else "Full transcript attached at the end"))
         }
         pdf.table(listOf(if (af) "Besonderheid" else "Item", ""), details, listOf(1f, 3.2f))
 
@@ -255,10 +259,30 @@ object Exporter {
 
         if (includeTranscript && m.utterances.isNotEmpty()) {
             pdf.newPage()
-            pdf.sectionBar(if (af) "Bylae: transkripsie" else "Appendix: transcript")
+            pdf.sectionBar(if (af) "Volledige transkripsie" else "Full transcript")
+            pdf.text(
+                (if (af) "Woord vir woord, met tyd en spreker. " else "Word for word, with time and speaker. ") +
+                    m.speakers.joinToString(" · ") { it.name } + " · " + formatDuration(m.durationMs),
+                pdf.small, after = 10f,
+            )
             m.utterances.forEach { u ->
-                pdf.text("${formatDuration(u.startMs)}   ${m.speakerName(u.speaker)}", TextPaint(pdf.small).apply { typeface = Typeface.DEFAULT_BOLD }, after = 1f)
-                pdf.text(u.text, after = 7f)
+                val sp = m.speaker(u.speaker)
+                val colour = speakerColor(sp.colorIndex).toArgb()
+                val head = android.text.SpannableStringBuilder()
+                val n0 = head.length
+                head.append(sp.name)
+                head.setSpan(android.text.style.ForegroundColorSpan(colour), n0, head.length, 0)
+                head.setSpan(android.text.style.StyleSpan(Typeface.BOLD), n0, head.length, 0)
+                val t0 = head.length
+                head.append("   " + formatDuration(u.startMs))
+                head.setSpan(android.text.style.ForegroundColorSpan(pdf.grey), t0, head.length, 0)
+                pdf.ensure(40f)
+                pdf.text(head, TextPaint(pdf.small).apply { textSize = 9f }, after = 1f)
+                // A thin speaker-coloured rule next to the paragraph, like the app's transcript.
+                val y0 = pdf.y
+                val pageBefore = pdf.pageNo
+                pdf.text(u.text, pdf.body, indent = 8f, after = 8f)
+                if (pdf.pageNo == pageBefore) pdf.page.canvas.drawRect(pdf.margin, y0 + 1f, pdf.margin + 2.2f, pdf.y - 9f, Paint().apply { color = colour })
             }
         }
         pdf.finish(out)

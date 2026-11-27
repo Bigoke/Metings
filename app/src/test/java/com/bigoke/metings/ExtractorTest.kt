@@ -112,4 +112,27 @@ class ExtractorTest {
         val fixed = TextCleaner.clean("ons ry johannesberg toe", "af", false, emptyList(), mapOf("johannesberg" to "Johannesburg"))
         println(fixed); assertEquals("Ons ry Johannesburg toe.", fixed)
     }
+
+    @Test fun namesFromConversation() {
+        val us = listOf(
+            Utterance(0, 0, 4000, "Goeiemôre almal, my naam is Marietjie Botha en ek lei vandag die vergadering."),
+            Utterance(1, 4500, 8000, "Dankie. Ek het die kwotasie gekry."),
+            Utterance(0, 8500, 12000, "Jan, sal jy die bestelling plaas?"),
+            Utterance(1, 12500, 15000, "Ja, ek sal dit doen."),
+            Utterance(0, 15500, 18000, "Dankie Jan. Sarah, het jy die verf gekies?"),
+            Utterance(2, 18500, 20000, "Nog nie."),
+            Utterance(0, 20500, 23000, "Ons moet ook vir Pieter laat weet, Sarah."),
+            Utterance(2, 23500, 25000, "Ek sal hom bel."),
+        )
+        val m = com.bigoke.metings.data.Meeting(
+            id = "t", title = "t", createdAt = 0, language = "af", utterances = us,
+            speakers = (0..2).map { com.bigoke.metings.data.Speaker(it, com.bigoke.metings.data.defaultSpeakerName(it, "af")) },
+        )
+        val r = com.bigoke.metings.engine.SpeakerNamer.find(m)
+        println(r)
+        assertEquals("Marietjie Botha", r.named[0])
+        assertEquals("Jan", r.named[1])
+        assertEquals("Sarah", r.named[2])
+        assertTrue(0 in r.introduced)
+    }
 }

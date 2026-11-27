@@ -54,10 +54,14 @@ import com.bigoke.metings.util.LocalAf
 import com.bigoke.metings.util.Ui
 import com.bigoke.metings.util.tr
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 class MainActivity : FragmentActivity() {
 
     private val pendingRoute = mutableStateOf<String?>(null)
+    /** Audio files shared to Notule from another app (WhatsApp, Truecaller, a call recorder…). */
+    private val sharedUris = mutableStateOf<List<android.net.Uri>>(emptyList())
+    private val openImport = mutableStateOf(false)
     private val locked = mutableStateOf(false)
     private var backgroundAt = 0L
 
@@ -73,7 +77,11 @@ class MainActivity : FragmentActivity() {
             CompositionLocalProvider(LocalAf provides af) {
                 MetingsTheme {
                     if (locked.value && settings.appLock) LockScreen { authenticate() }
-                    else AppNav(pendingRoute.value, onConsumed = { pendingRoute.value = null }, onClose = { finish() })
+                    else AppNav(
+                        pendingRoute.value, onConsumed = { pendingRoute.value = null }, onClose = { finish() },
+                        shared = sharedUris.value, onSharedConsumed = { sharedUris.value = emptyList() },
+                        openImport = openImport.value, onImportOpened = { openImport.value = false },
+                    )
                 }
             }
         }
@@ -125,10 +133,26 @@ class MainActivity : FragmentActivity() {
 
     private fun handle(intent: Intent?) {
         intent ?: return
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                @Suppress("DEPRECATION")
+                val u = (if (android.os.Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                    else intent.getParcelableExtra(Intent.EXTRA_STREAM) as? android.net.Uri) ?: intent.data
+                if (u != null) sharedUris.value = listOf(u)
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                @Suppress("DEPRECATION")
+                val list = if (android.os.Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                    else intent.getParcelableArrayListExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                if (!list.isNullOrEmpty()) sharedUris.value = list.toList()
+            }
+            Intent.ACTION_VIEW -> intent.data?.let { sharedUris.value = listOf(it) }
+        }
         intent.getStringExtra("meeting")?.let { pendingRoute.value = "meeting/$it" }
         when (intent.getStringExtra("open")) {
             "record" -> pendingRoute.value = "record?auto=false"
             "quickRecord" -> pendingRoute.value = "record?auto=true"
+            "import" -> openImport.value = true
         }
     }
 }
@@ -152,8 +176,53 @@ private fun LockScreen(onUnlock: () -> Unit) {
 }
 
 @Composable
-private fun AppNav(pending: String?, onConsumed: () -> Unit, onClose: () -> Unit) {
+private fun AppNav(
+    pending: String?, onConsumed: () -> Unit, onClose: () -> Unit,
+    shared: List<android.net.Uri>, onSharedConsumed: () -> Unit,
+    openImport: Boolean, onImportOpened: () -> Unit,
+) {
     val nav = rememberNavController()
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var sheet by remember { mutableStateOf(false) }
+    var sheetShared by remember { mutableStateOf<List<android.net.Uri>>(emptyList()) }
+    val failMsg = tr("Could not read this audio file.", "Kon nie hierdie klanklêer lees nie.")
+    val doneMsg = tr("imported", "ingevoer")
+    fun runImport(uris: List<android.net.Uri>, opts: com.bigoke.metings.engine.ImportOptions) {
+        sheet = false
+        if (uris.isEmpty()) return
+        com.bigoke.metings.ui.ImportProgress.fraction = 0f
+        com.bigoke.metings.ui.ImportProgress.error = null
+        nav.popBackStack("home", inclusive = false)
+        scope.launch {
+            val ids = ArrayList<String>()
+            uris.forEachIndexed { i, u ->
+                com.bigoke.metings.ui.ImportProgress.label = if (uris.size > 1) " ${i + 1}/${uris.size}" else ""
+                val id = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.bigoke.metings.engine.ImportSources.importOne(ctx, u, opts) { f ->
+                        com.bigoke.metings.ui.ImportProgress.fraction = (i + f) / uris.size
+                    }
+                }
+                if (id != null) ids += id
+            }
+            com.bigoke.metings.ui.ImportProgress.fraction = null
+            com.bigoke.metings.ui.ImportProgress.label = ""
+            if (ids.size < uris.size) com.bigoke.metings.ui.ImportProgress.error = failMsg + if (ids.isNotEmpty()) " (${uris.size - ids.size})" else ""
+            com.bigoke.metings.engine.ImportSources.startProcessing(ctx, ids)
+            if (ids.size == 1) nav.navigate("meeting/${ids[0]}")
+            else if (ids.size > 1) android.widget.Toast.makeText(ctx, "${ids.size} $doneMsg", android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    LaunchedEffect(shared) {
+        if (shared.isNotEmpty()) {
+            val s = MetingsApp.instance.prefs.settings.value
+            if (s.quickImport) runImport(shared, com.bigoke.metings.engine.ImportOptions(s.importLanguage, s.importTemplate, s.importFolderBySource, s.importTranscribe))
+            else { sheetShared = shared; sheet = true }
+            onSharedConsumed()
+        }
+    }
+    LaunchedEffect(openImport) { if (openImport) { sheetShared = emptyList(); sheet = true; onImportOpened() } }
+    if (sheet) com.bigoke.metings.ui.ImportSheet(sheetShared, onDismiss = { sheet = false }, onImport = { u, o -> runImport(u, o) })
     LaunchedEffect(pending) {
         if (pending != null) {
             nav.navigate(pending) { launchSingleTop = true }
@@ -170,6 +239,7 @@ private fun AppNav(pending: String?, onConsumed: () -> Unit, onClose: () -> Unit
                 onModels = { nav.navigate("models") },
                 onSettings = { nav.navigate("settings") },
                 onTasks = { nav.navigate("tasks") },
+                onImport = { sheetShared = emptyList(); sheet = true },
             )
             if (confirmExit) {
                 AlertDialog(

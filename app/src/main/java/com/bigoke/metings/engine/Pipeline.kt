@@ -320,12 +320,21 @@ class Pipeline(
                 Speaker(sid, known.name, voiceprint = print, recognised = true)
             } else Speaker(sid, com.bigoke.metings.data.defaultSpeakerName(sid, meetingLang), voiceprint = print)
         }
-        val m = m0.copy(
+        var m = m0.copy(
             language = meetingLang,
             durationMs = durationMs,
             utterances = utterances,
             speakers = speakers,
         )
+        // Names said in the conversation ("my naam is Jan", "Sarah, will you…") label the voices.
+        runCatching {
+            val (named, r) = SpeakerNamer.apply(m, voices.voices.value.map { it.name })
+            m = named
+            // Someone who introduced themselves: remember the voice so they are recognised next time.
+            r.introduced.forEach { sid -> m.speakers.firstOrNull { it.id == sid }?.let { sp -> voices.remember(sp.name, sp.voiceprint) } }
+        }
+        // Known voices heard again: strengthen what is remembered about them.
+        m.speakers.filter { it.recognised }.forEach { sp -> runCatching { voices.remember(sp.name, sp.voiceprint) } }
         repo.save(m)
         return m
     }
@@ -384,6 +393,7 @@ class Pipeline(
         var start = 0L; var end = 0L
         val sb = StringBuilder()
         val unsure = ArrayList<String>()
+        val wordStarts = ArrayList<Int>()
         val fixes = corrections.asMap()
         val slang = prefs.settings.value.translateSlang
         val langCount = HashMap<String, Int>()
@@ -391,8 +401,9 @@ class Pipeline(
             if (sb.isEmpty()) return
             val uLang = if (lang == "auto") (langCount.maxByOrNull { it.value }?.key ?: "af") else lang
             val text = TextCleaner.clean(sb.toString(), uLang, removeFillers, vocab, fixes, slang)
-            if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text, unsure = unsure.distinct(), lang = uLang)
+            if (text.length > 1) out += Utterance(spk.coerceAtLeast(0), start, end, text, unsure = unsure.distinct(), lang = uLang, wordMs = wordStarts.toList())
             sb.clear()
+            wordStarts.clear()
             unsure.clear()
             langCount.clear()
         }
@@ -413,6 +424,7 @@ class Pipeline(
             }
             if (sb.isNotEmpty()) sb.append(' ')
             sb.append(w.text)
+            wordStarts += (w.startMs - start).toInt().coerceAtLeast(0)
             val core = w.text.trim { !it.isLetterOrDigit() }
             if (w.prob < 0.45f && core.length >= 3) unsure += core.lowercase()
             if (w.lang.isNotEmpty()) langCount[w.lang] = (langCount[w.lang] ?: 0) + 1
@@ -428,6 +440,7 @@ class Pipeline(
                 merged[merged.size - 1] = prev.copy(
                     text = TextCleaner.clean(prev.text.trimEnd('.') + " " + u.text, prev.lang.ifEmpty { lang }, false, vocab),
                     endMs = u.endMs, unsure = (prev.unsure + u.unsure).distinct(),
+                    wordMs = prev.wordMs + u.wordMs.map { it + (u.startMs - prev.startMs).toInt() },
                 )
             } else merged += u
         }

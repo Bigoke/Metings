@@ -22,6 +22,8 @@ data class Speaker(
     val voiceprint: List<Float> = emptyList(),
     /** True when the name came from a voice remembered in an earlier meeting. */
     val recognised: Boolean = false,
+    /** "said" when the name was picked up from the conversation ("my name is…", "Jan, will you…"). */
+    val nameSource: String = "",
 )
 
 @Serializable
@@ -35,6 +37,8 @@ data class Utterance(
     val unsure: List<String> = emptyList(),
     /** "af" or "en" — detected per paragraph when the meeting language is Auto. */
     val lang: String = "",
+    /** Start of each spoken word, in ms after [startMs] (used to follow the audio word by word). */
+    val wordMs: List<Int> = emptyList(),
 )
 
 @Serializable
@@ -110,6 +114,10 @@ data class Meeting(
     val template: String = "general",
     /** Questions asked about this meeting ("Ask Notule") and their answers. */
     val qa: List<QaItem> = emptyList(),
+    /** True once names said in the conversation have been matched to the voices. */
+    val namesChecked: Boolean = false,
+    /** People spoken to by name who were not matched to a voice (maybe they did not speak). */
+    val addressed: List<String> = emptyList(),
 ) {
     fun speakerName(id: Int): String = speakers.firstOrNull { it.id == id }?.name ?: defaultSpeakerName(id, language)
     fun speaker(id: Int): Speaker = speakers.firstOrNull { it.id == id } ?: Speaker(id, defaultSpeakerName(id, language))

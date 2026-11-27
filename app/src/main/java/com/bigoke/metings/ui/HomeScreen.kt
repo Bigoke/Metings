@@ -40,6 +40,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Subtitles
 import androidx.compose.material3.AlertDialog
@@ -114,7 +115,7 @@ import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> Unit, onSettings: () -> Unit, onTasks: () -> Unit) {
+fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> Unit, onSettings: () -> Unit, onTasks: () -> Unit, onImport: () -> Unit) {
     val app = MetingsApp.instance
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -135,45 +136,14 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
         ids.firstOrNull()?.let { ProcessingService.enqueue(ctx, it) }
     }
     var folder by remember { mutableStateOf<String?>(null) }
-    var importing by remember { mutableStateOf<Float?>(null) }
-    var importError by remember { mutableStateOf<String?>(null) }
+    val importing = ImportProgress.fraction
+    val importError = ImportProgress.error
     val coreReady = remember(modelStatus) { app.models.coreReady }
     val folders = remember(meetings) { meetings.map { it.folder }.filter { it.isNotBlank() }.distinct().sorted() }
     val openTasks = remember(meetings) { meetings.sumOf { m -> m.summary?.actions?.count { !it.done } ?: 0 } }
-    val importFailed = tr("Could not read this audio file.", "Kon nie hierdie klanklêer lees nie.")
-    val importedTitle = tr("Imported", "Ingevoer")
     val pm = ctx.getSystemService(PowerManager::class.java)
     var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
-
-    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val s = app.prefs.settings.value
-        val id = app.repo.newId()
-        val name = runCatching {
-            ctx.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                if (c.moveToFirst()) c.getString(0) else null
-            }
-        }.getOrNull()?.substringBeforeLast('.') ?: importedTitle
-        importing = 0f
-        scope.launch {
-            val ok = withContext(Dispatchers.IO) {
-                runCatching {
-                    val wav = File(app.repo.folder(id), "audio.wav")
-                    val dur = AudioImporter.import(ctx, uri, wav) { f -> importing = f }
-                    app.repo.save(
-                        Meeting(
-                            id = id, title = name, createdAt = System.currentTimeMillis(), durationMs = dur,
-                            language = s.language, status = if (s.autoTranscribe) MeetingStatus.QUEUED else MeetingStatus.NEW,
-                            folder = folder ?: "", template = s.lastTemplate,
-                        )
-                    )
-                }.isSuccess
-            }
-            importing = null
-            if (ok) { if (s.autoTranscribe) ProcessingService.enqueue(ctx, id); onOpen(id) } else { app.repo.delete(id); importError = importFailed }
-        }
-    }
 
     val filtered = remember(meetings, query, folder, pendingDelete) {
         meetings.filter { m -> m.id !in pendingDelete && (folder == null || m.folder == folder) }.filter { m ->
@@ -218,7 +188,7 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                         shadowElevation = 10.dp, tonalElevation = 2.dp,
                     ) {
                         Row(Modifier.padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            DockButton(Icons.Outlined.AudioFile, tr("Import", "Voer in")) { importer.launch(arrayOf("audio/*", "video/*")) }
+                            DockButton(Icons.Outlined.AudioFile, tr("Import", "Voer in")) (onImport)
                             Spacer(Modifier.width(10.dp))
                             RecordOrb(onClick = onRecord, size = 64.dp)
                             Spacer(Modifier.width(10.dp))
@@ -267,7 +237,7 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                 item {
                     Card(Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(16.dp)) {
-                            Text(tr("Importing audio…", "Voer klank in…"), style = MaterialTheme.typography.titleSmall)
+                            Text(tr("Importing audio…", "Voer klank in…") + ImportProgress.label, style = MaterialTheme.typography.titleSmall)
                             Spacer(Modifier.height(6.dp))
                             LinearProgressIndicator(progress = { f }, modifier = Modifier.fillMaxWidth())
                         }
@@ -275,7 +245,7 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
                 }
             }
             importError?.let { e ->
-                item { Text(e, color = MaterialTheme.colorScheme.error, modifier = Modifier.clickable { importError = null }) }
+                item { Text(e, color = MaterialTheme.colorScheme.error, modifier = Modifier.clickable { ImportProgress.error = null }) }
             }
             if (folders.isNotEmpty()) {
                 item {
@@ -309,17 +279,41 @@ fun HomeScreen(onRecord: () -> Unit, onOpen: (String) -> Unit, onModels: () -> U
             }
             item {
                 if (meetings.isNotEmpty() && selected.isEmpty()) Text(
-                    tr("Tip: press and hold a meeting to select, transcribe or delete.", "Wenk: druk en hou 'n vergadering om te kies, te transkribeer of te skrap."),
+                    tr("Tip: swipe left to delete, right to transcribe or share. Press and hold to select several.",
+                        "Wenk: swiep links om te skrap, regs om te transkribeer of te deel. Druk en hou om meer te kies."),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             items(filtered, key = { it.id }) { m ->
-                MeetingCard(
-                    m, progress[m.id], isSelected = m.id in selected, coreReady = coreReady,
-                    onClick = { if (selected.isNotEmpty()) selected = if (m.id in selected) selected - m.id else selected + m.id else onOpen(m.id) },
-                    onLongClick = { selected = if (m.id in selected) selected - m.id else selected + m.id },
-                    onTranscribe = { transcribe(listOf(m.id)) },
-                )
+                val canTranscribe = coreReady && (m.status == MeetingStatus.NEW || m.status == MeetingStatus.FAILED)
+                val canShare = m.status == MeetingStatus.READY
+                SwipeMeeting(
+                    enabled = selected.isEmpty() && m.status != MeetingStatus.RECORDING,
+                    rightLabel = when { canTranscribe -> tr("Transcribe", "Transkribeer"); canShare -> tr("Share", "Deel"); else -> null },
+                    rightIcon = if (canTranscribe) Icons.Outlined.Subtitles else Icons.Outlined.Share,
+                    onRight = {
+                        if (canTranscribe) transcribe(listOf(m.id))
+                        else if (canShare) runCatching { com.bigoke.metings.util.Exporter.sharePdf(ctx, m) }
+                    },
+                    onDelete = {
+                        if (m.status == MeetingStatus.PROCESSING) ProcessingService.cancel(ctx)
+                        val ids = setOf(m.id)
+                        pendingDelete = pendingDelete + ids
+                        scope.launch {
+                            val res = snackbar.showSnackbar("\"${m.title}\" $deletedMsg", actionLabel = undoLabel, duration = SnackbarDuration.Long)
+                            if (res == SnackbarResult.ActionPerformed) pendingDelete = pendingDelete - ids
+                            else { withContext(Dispatchers.IO) { ids.forEach { app.repo.delete(it) } }; pendingDelete = pendingDelete - ids }
+                        }
+                    },
+                    modifier = Modifier.animateItem(),
+                ) {
+                    MeetingCard(
+                        m, progress[m.id], isSelected = m.id in selected, coreReady = coreReady,
+                        onClick = { if (selected.isNotEmpty()) selected = if (m.id in selected) selected - m.id else selected + m.id else onOpen(m.id) },
+                        onLongClick = { selected = if (m.id in selected) selected - m.id else selected + m.id },
+                        onTranscribe = { transcribe(listOf(m.id)) },
+                    )
+                }
             }
         }
     }
@@ -454,6 +448,50 @@ private fun MeetingCard(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeMeeting(
+    enabled: Boolean, rightLabel: String?, rightIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    onRight: () -> Unit, onDelete: () -> Unit, modifier: Modifier = Modifier, content: @Composable () -> Unit,
+) {
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val state = androidx.compose.material3.rememberSwipeToDismissBoxState(
+        confirmValueChange = { v ->
+            when (v) {
+                androidx.compose.material3.SwipeToDismissBoxValue.EndToStart -> {
+                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); onDelete(); true
+                }
+                androidx.compose.material3.SwipeToDismissBoxValue.StartToEnd -> {
+                    haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress); onRight(); false
+                }
+                else -> false
+            }
+        },
+        positionalThreshold = { it * 0.35f },
+    )
+    androidx.compose.material3.SwipeToDismissBox(
+        state = state, modifier = modifier,
+        enableDismissFromStartToEnd = enabled && rightLabel != null,
+        enableDismissFromEndToStart = enabled,
+        backgroundContent = {
+            val dir = state.dismissDirection
+            val toRight = dir == androidx.compose.material3.SwipeToDismissBoxValue.StartToEnd
+            if (dir == androidx.compose.material3.SwipeToDismissBoxValue.Settled) return@SwipeToDismissBox
+            val color = if (toRight) com.bigoke.metings.ui.theme.Teal else RecordRed
+            Box(
+                Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(color).padding(horizontal = 24.dp),
+                contentAlignment = if (toRight) Alignment.CenterStart else Alignment.CenterEnd,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(if (toRight) rightIcon else Icons.Outlined.Delete, null, tint = Color.White)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (toRight) rightLabel.orEmpty() else tr("Delete", "Skrap"), color = Color.White, style = MaterialTheme.typography.labelLarge)
+                }
+            }
+        },
+    ) { content() }
 }
 
 @Composable

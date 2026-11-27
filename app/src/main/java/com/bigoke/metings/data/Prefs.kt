@@ -29,6 +29,14 @@ data class Settings(
     val preparedBy: String = "",
     val lastFolder: String = "",
     val lastTemplate: String = "general",
+    // Import options (saved from the import sheet)
+    val importLanguage: String = "auto",
+    val importTemplate: String = "general",
+    /** Put imports in a folder named after where they came from (WhatsApp, Calls, Telegram…). */
+    val importFolderBySource: Boolean = true,
+    val importTranscribe: Boolean = true,
+    /** Files shared to Notule from other apps are imported straight away with the saved options. */
+    val quickImport: Boolean = false,
 )
 
 class Prefs(context: Context) {
@@ -55,6 +63,11 @@ class Prefs(context: Context) {
         preparedBy = sp.getString("preparedBy", "") ?: "",
         lastFolder = sp.getString("lastFolder", "") ?: "",
         lastTemplate = sp.getString("lastTemplate", "general") ?: "general",
+        importLanguage = sp.getString("importLanguage", "auto") ?: "auto",
+        importTemplate = sp.getString("importTemplate", "general") ?: "general",
+        importFolderBySource = sp.getBoolean("importFolderBySource", true),
+        importTranscribe = sp.getBoolean("importTranscribe", true),
+        quickImport = sp.getBoolean("quickImport", false),
     )
 
     fun update(change: (Settings) -> Settings) {
@@ -78,6 +91,11 @@ class Prefs(context: Context) {
             .putString("preparedBy", s.preparedBy)
             .putString("lastFolder", s.lastFolder)
             .putString("lastTemplate", s.lastTemplate)
+            .putString("importLanguage", s.importLanguage)
+            .putString("importTemplate", s.importTemplate)
+            .putBoolean("importFolderBySource", s.importFolderBySource)
+            .putBoolean("importTranscribe", s.importTranscribe)
+            .putBoolean("quickImport", s.quickImport)
             .apply()
         _settings.value = s
     }
