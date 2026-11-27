@@ -98,8 +98,9 @@ class ModelManager(private val context: Context) {
     }
 
     private val privateDir: File = File(context.getExternalFilesDir(null) ?: context.filesDir, "models").apply { mkdirs() }
-    private val sharedDir: File =
+    private val sharedDir: File = runCatching {
         File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), SHARED_SUBDIR)
+    }.getOrElse { File(privateDir, "shared") }
     private val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
     private val sp = context.getSharedPreferences("downloads", Context.MODE_PRIVATE)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -117,7 +118,7 @@ class ModelManager(private val context: Context) {
     }
 
     /** "All files access" granted, so the shared folder can be used. */
-    fun sharedAllowed(): Boolean = Environment.isExternalStorageManager()
+    fun sharedAllowed(): Boolean = runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
 
     val sharedFolderLabel: String get() = "Download/$SHARED_SUBDIR"
 
